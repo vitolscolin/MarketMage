@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 using MarketMage.Models;
@@ -15,424 +16,271 @@ namespace MarketMage.Windows;
 
 public sealed class MainWindow : Window, IDisposable
 {
-    private const int MaxRefreshItemCount = 50;
-    private static readonly string[] LodestoneWorldNames =
-    [
-        "Adamantoise",
-        "Cactuar",
-        "Faerie",
-        "Gilgamesh",
-        "Jenova",
-        "Midgardsormr",
-        "Sargatanas",
-        "Siren",
-        "Balmung",
-        "Brynhildr",
-        "Coeurl",
-        "Diabolos",
-        "Goblin",
-        "Malboro",
-        "Mateus",
-        "Zalera",
-        "Cuchulainn",
-        "Golem",
-        "Halicarnassus",
-        "Kraken",
-        "Maduin",
-        "Marilith",
-        "Rafflesia",
-        "Seraph",
-        "Behemoth",
-        "Excalibur",
-        "Exodus",
-        "Famfrit",
-        "Hyperion",
-        "Lamia",
-        "Leviathan",
-        "Ultros",
-        "Cerberus",
-        "Louisoix",
-        "Moogle",
-        "Omega",
-        "Phantom",
-        "Ragnarok",
-        "Sagittarius",
-        "Spriggan",
-        "Alpha",
-        "Lich",
-        "Odin",
-        "Phoenix",
-        "Raiden",
-        "Shiva",
-        "Twintania",
-        "Zodiark",
-        "Bismarck",
-        "Ravana",
-        "Sephirot",
-        "Sophia",
-        "Zurvan",
-        "Aegis",
-        "Atomos",
-        "Carbuncle",
-        "Garuda",
-        "Gungnir",
-        "Kujata",
-        "Tonberry",
-        "Typhon",
-        "Alexander",
-        "Bahamut",
-        "Durandal",
-        "Fenrir",
-        "Ifrit",
-        "Ridill",
-        "Tiamat",
-        "Ultima",
-        "Anima",
-        "Asura",
-        "Chocobo",
-        "Hades",
-        "Ixion",
-        "Masamune",
-        "Pandaemonium",
-        "Titan",
-        "Belias",
-        "Mandragora",
-        "Ramuh",
-        "Shinryu",
-        "Unicorn",
-        "Valefor",
-        "Yojimbo",
-        "Zeromus",
-    ];
-
-    private readonly UniversalisService universalisService;
-    private readonly ProfitService profitService;
-    private readonly RecipeService recipeService;
+    private readonly OpportunitiesPanel opportunities;
+    private bool manualMode;
+    private const int MaxSelection = 50;
+    private readonly UniversalisService market = new();
+    private readonly RecipeService recipes;
+    private readonly IDalamudPluginInterface pluginInterface;
     private readonly IPluginLog log;
-    private readonly IReadOnlyList<ItemCatalogEntry> itemCatalog;
-    private readonly IReadOnlyList<string> worldNames;
-    private readonly HashSet<uint> selectedItemIds = [];
-
-    private string selectedWorld = "Cactuar";
-    private string searchText = string.Empty;
-    private string statusText = "Ready.";
-    private bool isLoading;
-    private bool sortCatalogById;
-    private uint? selectedEstimateItemId;
+    private readonly Configuration config;
+    private readonly IReadOnlyList<ItemCatalogEntry> catalog;
+    private readonly HashSet<uint> craftable;
+    private readonly List<WorldEntry> worlds;
+    private readonly HashSet<uint> selected;
+    private readonly LatestRequest<RefreshResult> refresh = new();
+    private string search = string.Empty;
+    private string status = "Ready. Select items and refresh.";
+    private string resultContext = string.Empty;
+    private bool sortById;
+    private uint? detailItem;
     private IReadOnlyList<ProfitEstimate> estimates = [];
+    private ItemCatalogEntry[] visibleCatalog = [];
+    private bool catalogDirty = true;
+    private bool disposed;
+    private sealed record WorldEntry(string Name, string DataCenter, string Region);
+    private sealed record RefreshResult(IReadOnlyList<ProfitEstimate> Estimates, string Context, string? Error);
 
-    public MainWindow(IDataManager dataManager, IPluginLog log)
-        : base("MarketMage")
+    public MainWindow(IDataManager data, IPluginLog log, IDalamudPluginInterface pluginInterface, IPlayerState playerState) : base("MarketMage")
     {
         this.log = log;
-        universalisService = new UniversalisService(log);
-        profitService = new ProfitService(dataManager);
-        recipeService = new RecipeService(dataManager);
-        itemCatalog = profitService.GetItemCatalog();
-        worldNames = GetWorldNames(dataManager);
-        statusText = $"Loaded {itemCatalog.Count:N0} items from Lumina.";
-
-        SizeConstraints = new WindowSizeConstraints
-        {
-            MinimumSize = new Vector2(980, 520),
-            MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
-        };
+        this.pluginInterface = pluginInterface;
+        config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        recipes = new RecipeService(data);
+        catalog = new ItemCatalogService(data).GetItemCatalog();
+        craftable = recipes.GetCraftableItemIds();
+        worlds = data.GetExcelSheet<World>().Where(w => w.IsPublic && w.DataCenter.RowId > 0)
+            .Select(w => new WorldEntry(w.Name.ToString(), w.DataCenter.Value.Name.ToString(), Region(w.DataCenter.Value.Region.RowId)))
+            .Where(w => !string.IsNullOrWhiteSpace(w.Name) && !string.IsNullOrWhiteSpace(w.DataCenter))
+            .OrderBy(w => w.Region).ThenBy(w => w.DataCenter).ThenBy(w => w.Name).ToList();
+        if (!worlds.Any(w => w.Name == config.World)) config.World = worlds.FirstOrDefault()?.Name ?? string.Empty;
+        var validIds = catalog.Select(i => i.ItemId).ToHashSet();
+        selected = (config.SelectedItems ?? []).Where(validIds.Contains).Take(MaxSelection).ToHashSet();
+        opportunities = new OpportunitiesPanel(playerState, market, catalog, recipes.GetRecipeOptions(validIds),
+            worlds.GroupBy(w => w.DataCenter).ToDictionary(g => g.Key, g => (IReadOnlySet<string>)g.Select(w => w.Name).ToHashSet()), config, pluginInterface, log);
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(1050, 650), MaximumSize = new Vector2(float.MaxValue) };
     }
 
     public void Dispose()
     {
-        universalisService.Dispose();
+        if (disposed) return;
+        disposed = true;
+        opportunities.Dispose();
+        refresh.Dispose();
+        market.Dispose();
+    }
+
+    public void UpdateOpportunities() => opportunities.Update(IsOpen && !manualMode);
+
+    public override void OnClose()
+    {
+        opportunities.Suspend();
+        refresh.Cancel();
     }
 
     public override void Draw()
     {
-        ImGui.TextUnformatted("World");
+        var previousMode = manualMode;
+        if (ImGui.RadioButton("Find gil opportunities", !manualMode)) manualMode = false;
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(180);
-        DrawWorldCombo();
-
-        ImGui.SameLine();
-        ImGui.TextUnformatted("Search");
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(360);
-        ImGui.InputText("##itemSearch", ref searchText, 128);
-
-        ImGui.SameLine();
-        ImGui.Checkbox("Sort by ID", ref sortCatalogById);
-
-        ImGui.SameLine();
-        if (isLoading)
-            ImGui.BeginDisabled();
-
-        if (ImGui.Button("Refresh"))
-            _ = RefreshAsync();
-
-        if (isLoading)
-            ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        if (ImGui.Button("Clear"))
+        if (ImGui.RadioButton("Manual comparison", manualMode)) manualMode = true;
+        if (previousMode != manualMode)
         {
-            selectedItemIds.Clear();
-            estimates = [];
+            if (manualMode) opportunities.Suspend();
+            else refresh.Cancel();
         }
-
-        ImGui.Spacing();
-        ImGui.TextUnformatted($"{statusText} Selected: {selectedItemIds.Count:N0}.");
-        ImGui.Spacing();
-
-        var contentHeight = ImGui.GetContentRegionAvail().Y;
-        var catalogHeight = Math.Max(170, contentHeight * 0.42f);
-        DrawCatalogTable(catalogHeight);
-
-        ImGui.Spacing();
-        DrawResultsTable(Math.Max(170, ImGui.GetContentRegionAvail().Y * 0.58f));
-        ImGui.Spacing();
-        DrawEstimateDetails();
+        ImGui.Separator();
+        if (!manualMode) { opportunities.Draw(); return; }
+        DrawManual();
     }
 
-    private async Task RefreshAsync()
+    private void DrawManual()
     {
-        if (isLoading)
-            return;
+        if (refresh.TryTake(out var completed))
+        {
+            estimates = completed.Estimates;
+            resultContext = completed.Context;
+            detailItem = estimates.FirstOrDefault()?.ItemId;
+            status = completed.Error ?? $"Loaded {estimates.Count} items. {estimates.Count(e => e.IsCraftable && !e.HasCompleteCost)} local costs incomplete.";
+        }
+        ImGui.SetNextItemWidth(230);
+        if (ImGui.BeginCombo("Sale world", config.World))
+        {
+            foreach (var group in worlds.GroupBy(w => $"{w.Region} / {w.DataCenter}"))
+            {
+                ImGui.TextDisabled(group.Key);
+                foreach (var world in group)
+                    if (ImGui.Selectable(world.Name, config.World == world.Name))
+                    { config.World = world.Name; Invalidate(); Save(); }
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine();
+        var hq = config.HighQuality;
+        if (ImGui.Checkbox("HQ output", ref hq)) { config.HighQuality = hq; Invalidate(); Save(); }
+        ImGui.SameLine();
+        var dc = config.CompareDataCenter;
+        if (ImGui.Checkbox("Compare data center", ref dc)) { config.CompareDataCenter = dc; Invalidate(); Save(); }
+        ImGui.SameLine();
+        ImGui.BeginDisabled(refresh.IsRunning || selected.Count == 0 || worlds.Count == 0);
+        if (ImGui.Button("Refresh")) StartRefresh();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        if (ImGui.Button(refresh.IsRunning ? "Cancel" : "Clear"))
+        {
+            if (refresh.IsRunning) Invalidate();
+            else { selected.Clear(); Invalidate(); Save(); }
+        }
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.InputText("Search name or ID", ref search, 128)) catalogDirty = true;
+        ImGui.SameLine();
+        var onlyCraftable = config.CraftableOnly;
+        if (ImGui.Checkbox("Craftable only", ref onlyCraftable)) { config.CraftableOnly = onlyCraftable; catalogDirty = true; Save(); }
+        ImGui.SameLine();
+        if (ImGui.Checkbox("Sort by ID", ref sortById)) catalogDirty = true;
+        ImGui.TextWrapped($"{status} Selected: {selected.Count}/{MaxSelection} (saved watchlist).");
+        DrawCatalog();
+        if (estimates.Count == 0) return;
+        ImGui.TextWrapped(resultContext);
+        ImGui.TextWrapped("Sale = median of up to 20 sampled transactions, not sales/day. Revenue assumes 5% sale tax. Ingredients: NQ listings, up to 100 per item/scope; partial-stack value, excluding purchase tax and travel. Actual stack outlay may be higher.");
+        DrawResults();
+        DrawDetails();
+    }
 
-        isLoading = true;
-        statusText = $"Refreshing {selectedWorld}...";
+    private void StartRefresh()
+    {
+        // Snapshot all game data on the UI thread before starting asynchronous network work.
+        var world = worlds.FirstOrDefault(w => w.Name == config.World);
+        if (world == null || selected.Count == 0) return;
+        var ids = selected.Order().ToArray();
+        var recipeMap = recipes.GetRecipesForItems(ids);
+        var names = catalog.Where(i => selected.Contains(i.ItemId)).ToDictionary(i => i.ItemId, i => i.Name);
+        var hq = config.HighQuality;
+        var compare = config.CompareDataCenter;
+        estimates = [];
+        status = $"Refreshing {world.Name}...";
+        refresh.Start(token => FetchAsync(world, ids, recipeMap, names, hq, compare, token));
+    }
 
+    private async Task<RefreshResult> FetchAsync(WorldEntry world, uint[] ids, IReadOnlyDictionary<uint, CraftingRecipe> recipeMap,
+        Dictionary<uint, string> names, bool hq, bool compare, CancellationToken token)
+    {
         try
         {
-            var itemIds = selectedItemIds.OrderBy(itemId => itemId).ToList();
-            if (itemIds.Count == 0)
-                throw new InvalidOperationException("Select at least one item first.");
-
-            if (itemIds.Count > MaxRefreshItemCount)
-                throw new InvalidOperationException($"Select {MaxRefreshItemCount} or fewer items for one refresh.");
-
-            var saleSnapshots = await universalisService.GetRecentSaleSnapshotsAsync(selectedWorld, itemIds).ConfigureAwait(false);
-            var recipes = recipeService.GetRecipesForItems(itemIds);
-            var ingredientIds = recipes.Values
-                .SelectMany(recipe => recipe.Ingredients)
-                .Select(ingredient => ingredient.ItemId)
-                .Distinct()
-                .ToList();
-            var ingredientSnapshots = ingredientIds.Count == 0
-                ? []
-                : await universalisService.GetRecentSaleSnapshotsAsync(selectedWorld, ingredientIds).ConfigureAwait(false);
-            var ingredientPrices = ingredientSnapshots.ToDictionary(snapshot => snapshot.ItemId);
-
-            estimates = profitService.BuildEstimates(saleSnapshots, recipes, ingredientPrices);
-            selectedEstimateItemId ??= estimates.FirstOrDefault()?.ItemId;
-
-            var incompleteCount = estimates.Count(estimate => estimate.IsCraftable && !estimate.HasCompleteCost);
-            statusText = incompleteCount == 0
-                ? $"Loaded {estimates.Count} items and {ingredientPrices.Count} ingredient prices from Universalis."
-                : $"Loaded {estimates.Count} items. {incompleteCount} craft costs are incomplete.";
+            var sales = await market.GetSnapshotsAsync(world.Name, ids, hq, false, token).ConfigureAwait(false);
+            var ingredientIds = recipeMap.Values.SelectMany(r => r.Ingredients).Select(i => i.ItemId).Distinct().ToArray();
+            var local = (await market.GetSnapshotsAsync(world.Name, ingredientIds, false, true, token).ConfigureAwait(false)).ToDictionary(s => s.ItemId);
+            var dc = compare
+                ? (await market.GetSnapshotsAsync(world.DataCenter, ingredientIds, false, true, token).ConfigureAwait(false)).ToDictionary(s => s.ItemId)
+                : new Dictionary<uint, MarketPriceSnapshot>();
+            // Include separately fetched local stock in the comparison without double-counting its listings.
+            if (compare)
+                foreach (var pair in local)
+                    dc[pair.Key] = new MarketPriceSnapshot { ItemId = pair.Key, Listings =
+                        (dc.GetValueOrDefault(pair.Key)?.Listings ?? []).Where(l => l.World != world.Name).Concat(pair.Value.Listings).ToList() };
+            var results = sales.Select(s => ProfitCalculator.Build(s, names[s.ItemId], recipeMap.GetValueOrDefault(s.ItemId), local, dc))
+                .OrderByDescending(e => e.Profit ?? long.MinValue).ToList();
+            return new RefreshResult(results, $"Sale world: {world.Name} | Output: {(hq ? "HQ" : "NQ")} | DC comparison: {(compare ? world.DataCenter : "off")} | Retrieved: {DateTimeOffset.Now:g}", null);
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { return new RefreshResult([], "", "Refresh canceled."); }
         catch (Exception ex)
         {
-            statusText = $"Refresh failed: {ex.Message}";
             log.Error(ex, "MarketMage refresh failed.");
-        }
-        finally
-        {
-            isLoading = false;
+            return new RefreshResult([], "", "Refresh failed. Check the connection and try again; details are in the plugin log.");
         }
     }
 
-    private void DrawCatalogTable(float height)
+    private void Invalidate()
     {
-        const ImGuiTableFlags tableFlags =
-            ImGuiTableFlags.Borders |
-            ImGuiTableFlags.RowBg |
-            ImGuiTableFlags.Resizable |
-            ImGuiTableFlags.ScrollY |
-            ImGuiTableFlags.SizingStretchProp;
-
-        if (!ImGui.BeginTable("##marketmage-catalog", 3, tableFlags, new Vector2(0, height)))
-            return;
-
-        ImGui.TableSetupColumn("Use");
-        ImGui.TableSetupColumn("Item");
-        ImGui.TableSetupColumn("ID");
-        ImGui.TableHeadersRow();
-
-        foreach (var item in GetFilteredCatalog().Take(250))
+        refresh.Cancel();
+        estimates = [];
+        detailItem = null;
+        resultContext = string.Empty;
+        status = "Selection changed or request canceled. Refresh to load prices.";
+    }
+    private void Save()
+    {
+        config.SelectedItems = selected.Order().ToList();
+        pluginInterface.SavePluginConfig(config);
+    }
+    private void Toggle(uint id)
+    {
+        if (!selected.Remove(id) && selected.Count < MaxSelection) selected.Add(id);
+        Invalidate();
+        Save();
+    }
+    private void DrawCatalog()
+    {
+        if (catalogDirty)
         {
-            var selected = selectedItemIds.Contains(item.ItemId);
-
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
-            if (ImGui.Checkbox($"##select-{item.ItemId}", ref selected))
-            {
-                if (selected)
-                    selectedItemIds.Add(item.ItemId);
-                else
-                    selectedItemIds.Remove(item.ItemId);
-            }
-
-            ImGui.TableNextColumn();
-            if (ImGui.Selectable($"{item.Name}##item-{item.ItemId}", selected, ImGuiSelectableFlags.SpanAllColumns))
-            {
-                if (!selectedItemIds.Remove(item.ItemId))
-                    selectedItemIds.Add(item.ItemId);
-            }
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(item.ItemId.ToString(CultureInfo.InvariantCulture));
+            var query = search.Trim();
+            var filtered = catalog.Where(i => (!config.CraftableOnly || craftable.Contains(i.ItemId)) &&
+                (query.Length == 0 || i.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || i.ItemId.ToString() == query));
+            visibleCatalog = (sortById ? filtered.OrderBy(i => i.ItemId) : filtered.OrderBy(i => i.Name)).ToArray();
+            catalogDirty = false;
         }
-
+        ImGui.TextDisabled($"Showing {Math.Min(250, visibleCatalog.Length):N0} of {visibleCatalog.Length:N0} matches. Narrow your search to see more.");
+        if (!ImGui.BeginTable("catalog", 3, TableFlags, new Vector2(0, 170))) return;
+        Headers("Use", "Item", "ID");
+        foreach (var item in visibleCatalog.Take(250))
+        {
+            ImGui.TableNextRow(); ImGui.TableNextColumn();
+            var enabled = selected.Contains(item.ItemId);
+            ImGui.BeginDisabled(!enabled && selected.Count >= MaxSelection);
+            if (ImGui.Checkbox($"##{item.ItemId}", ref enabled)) Toggle(item.ItemId);
+            ImGui.EndDisabled();
+            Cell(item.Name); Cell(item.ItemId.ToString());
+        }
         ImGui.EndTable();
     }
-
-    private void DrawWorldCombo()
+    private void DrawResults()
     {
-        if (!ImGui.BeginCombo("##world", selectedWorld))
-            return;
-
-        foreach (var worldName in worldNames)
+        if (!ImGui.BeginTable("results", 10, TableFlags, new Vector2(0, 180))) return;
+        Headers("Item", "Sale", "Local cost", "DC cost", "Revenue", "Local profit", "DC profit", "ROI", "Sample", "Last sale / upload");
+        foreach (var e in estimates)
         {
-            var isSelected = selectedWorld == worldName;
-            if (ImGui.Selectable(worldName, isSelected))
-                selectedWorld = worldName;
-
-            if (isSelected)
-                ImGui.SetItemDefaultFocus();
+            ImGui.TableNextRow(); ImGui.TableNextColumn();
+            if (ImGui.Selectable($"{e.ItemName}##result{e.ItemId}", detailItem == e.ItemId)) detailItem = e.ItemId;
+            Cell(e.EstimatedSalePrice > 0 ? e.EstimatedSalePrice.ToString("N0") : "No sales");
+            Cell(e.IsCraftable ? Money(e.EstimatedMaterialCost) : "Not craftable");
+            Cell(config.CompareDataCenter ? Money(e.DataCenterMaterialCost) : "Off");
+            Cell(Money(e.AdjustedRevenue)); Cell(Money(e.Profit));
+            Cell(config.CompareDataCenter ? Money(e.DataCenterProfit) : "Off");
+            Cell(e.Roi?.ToString("P0") ?? "N/A"); Cell(e.RecentSalesCount.ToString());
+            Cell($"{Age(e.LastSaleTime)} / {Age(e.UploadedAt)}");
         }
-
-        ImGui.EndCombo();
-    }
-
-    private void DrawResultsTable(float height)
-    {
-        const ImGuiTableFlags tableFlags =
-            ImGuiTableFlags.Borders |
-            ImGuiTableFlags.RowBg |
-            ImGuiTableFlags.Resizable |
-            ImGuiTableFlags.ScrollY |
-            ImGuiTableFlags.SizingStretchProp;
-
-        if (!ImGui.BeginTable("##marketmage-results", 8, tableFlags, new Vector2(0, height)))
-            return;
-
-        ImGui.TableSetupColumn("Item");
-        ImGui.TableSetupColumn("Sale");
-        ImGui.TableSetupColumn("Cost");
-        ImGui.TableSetupColumn("Revenue");
-        ImGui.TableSetupColumn("Profit");
-        ImGui.TableSetupColumn("ROI");
-        ImGui.TableSetupColumn("Sales");
-        ImGui.TableSetupColumn("Last Sale");
-        ImGui.TableHeadersRow();
-
-        foreach (var estimate in estimates)
-        {
-            var selected = selectedEstimateItemId == estimate.ItemId;
-
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
-            if (ImGui.Selectable($"{estimate.ItemName}##result-{estimate.ItemId}", selected, ImGuiSelectableFlags.SpanAllColumns))
-                selectedEstimateItemId = estimate.ItemId;
-
-            DrawCell(estimate.EstimatedSalePrice.ToString("N0"));
-            DrawCell(GetCostText(estimate));
-            if (estimate.IsCraftable && !estimate.HasCompleteCost && estimate.MissingIngredientNames.Count > 0 && ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Missing prices: {string.Join(", ", estimate.MissingIngredientNames)}");
-
-            DrawCell(estimate.AdjustedRevenue?.ToString("N0") ?? "N/A");
-            DrawCell(estimate.Profit?.ToString("N0") ?? "N/A");
-            DrawCell(estimate.Roi?.ToString("P0") ?? "N/A");
-            DrawCell(estimate.RecentSalesCount.ToString("N0"));
-            DrawCell(estimate.LastSaleTime?.LocalDateTime.ToString("g") ?? "None");
-        }
-
         ImGui.EndTable();
     }
-
-    private static void DrawCell(string text)
+    private void DrawDetails()
     {
-        ImGui.TableNextColumn();
-        ImGui.TextUnformatted(text);
-    }
-
-    private void DrawEstimateDetails()
-    {
-        var estimate = estimates.FirstOrDefault(estimate => estimate.ItemId == selectedEstimateItemId) ?? estimates.FirstOrDefault();
-        if (estimate is null)
-            return;
-
-        ImGui.Separator();
-        ImGui.TextUnformatted("Recipe");
-        ImGui.TextUnformatted($"{estimate.ItemName} ({estimate.ItemId})");
-
-        if (!estimate.IsCraftable)
+        var e = estimates.FirstOrDefault(e => e.ItemId == detailItem);
+        if (e == null) return;
+        ImGui.TextWrapped($"{e.ItemName} — yield {e.RecipeYield}. DC chooses the cheapest sampled world with enough stock for EACH ingredient; multiple worlds may be required. Unknown or >24h ages need checking.");
+        if (!e.IsCraftable) { ImGui.TextUnformatted("No crafting recipe found."); return; }
+        if (!ImGui.BeginTable("ingredients", 8, TableFlags, new Vector2(0, 160))) return;
+        Headers("Ingredient", "Qty", "Local total", "Local stock / age", "DC total", "DC world", "DC stock", "DC age");
+        for (var i = 0; i < e.IngredientCosts.Count; i++)
         {
-            ImGui.TextUnformatted("Not craftable.");
-            return;
+            var local = e.IngredientCosts[i]; var dc = e.DataCenterIngredientCosts[i];
+            ImGui.TableNextRow(); Cell(local.ItemName); Cell(local.Quantity.ToString());
+            Cell(local.HasPrice ? local.TotalPrice.ToString("N0") : "Insufficient");
+            Cell($"{local.AvailableQuantity:N0} / {Age(local.ReviewedAt)}");
+            Cell(!config.CompareDataCenter ? "Off" : dc.HasPrice ? dc.TotalPrice.ToString("N0") : "Insufficient");
+            Cell(dc.SourceWorld); Cell(config.CompareDataCenter ? dc.AvailableQuantity.ToString("N0") : "—");
+            Cell(config.CompareDataCenter ? Age(dc.ReviewedAt) : "—");
         }
-
-        ImGui.TextUnformatted($"Yield: {estimate.RecipeYield:N0}");
-
-        const ImGuiTableFlags tableFlags =
-            ImGuiTableFlags.Borders |
-            ImGuiTableFlags.RowBg |
-            ImGuiTableFlags.SizingStretchProp;
-
-        if (!ImGui.BeginTable("##marketmage-ingredients", 5, tableFlags))
-            return;
-
-        ImGui.TableSetupColumn("Ingredient");
-        ImGui.TableSetupColumn("Qty");
-        ImGui.TableSetupColumn("Unit");
-        ImGui.TableSetupColumn("Total");
-        ImGui.TableSetupColumn("Status");
-        ImGui.TableHeadersRow();
-
-        foreach (var ingredient in estimate.IngredientCosts)
-        {
-            ImGui.TableNextRow();
-            DrawCell(ingredient.ItemName);
-            DrawCell(ingredient.Quantity.ToString("N0"));
-            DrawCell(ingredient.HasPrice ? ingredient.UnitPrice.ToString("N0") : "N/A");
-            DrawCell(ingredient.HasPrice ? ingredient.TotalPrice.ToString("N0") : "N/A");
-            DrawCell(ingredient.HasPrice ? "OK" : "Missing");
-        }
-
         ImGui.EndTable();
     }
-
-    private static string GetCostText(ProfitEstimate estimate)
+    private const ImGuiTableFlags TableFlags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY;
+    private static void Headers(params string[] names) { foreach (var name in names) ImGui.TableSetupColumn(name); ImGui.TableSetupScrollFreeze(0, 1); ImGui.TableHeadersRow(); }
+    private static void Cell(string text) { ImGui.TableNextColumn(); ImGui.TextUnformatted(text); }
+    private static string Money(long? value) => value?.ToString("N0") ?? "N/A";
+    private static string Age(DateTimeOffset? time)
     {
-        if (!estimate.IsCraftable)
-            return "N/A";
-
-        if (!estimate.HasCompleteCost)
-            return "Incomplete";
-
-        return estimate.EstimatedMaterialCost?.ToString("N0") ?? "N/A";
+        if (!time.HasValue) return "Unknown";
+        var age = DateTimeOffset.UtcNow - time.Value;
+        if (age < TimeSpan.Zero) return "Clock mismatch";
+        return age.TotalHours >= 24 ? $"{age.TotalDays:F1}d (stale)" : age.TotalHours >= 1 ? $"{age.TotalHours:F0}h" : $"{age.TotalMinutes:F0}m";
     }
-
-    private IEnumerable<ItemCatalogEntry> GetFilteredCatalog()
-    {
-        var query = searchText.Trim();
-        var filteredItems = string.IsNullOrWhiteSpace(query)
-            ? itemCatalog
-            : itemCatalog.Where(item => item.Name.Contains(query, StringComparison.OrdinalIgnoreCase));
-
-        return sortCatalogById
-            ? filteredItems.OrderBy(item => item.ItemId)
-            : filteredItems.OrderBy(item => item.Name).ThenBy(item => item.ItemId);
-    }
-
-    private static IReadOnlyList<string> GetWorldNames(IDataManager dataManager)
-    {
-        var availableWorldNames = dataManager.GetExcelSheet<World>()
-            .Select(world => world.Name.ToString())
-            .Where(worldName => !string.IsNullOrWhiteSpace(worldName))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var worldNames = LodestoneWorldNames
-            .Where(availableWorldNames.Contains)
-            .ToList();
-
-        return worldNames.Count == 0 ? ["Cactuar"] : worldNames;
-    }
+    private static string Region(uint region) => region switch { 1 => "Japan", 2 => "North America", 3 => "Europe", 4 => "Oceania", _ => $"Region {region}" };
 }

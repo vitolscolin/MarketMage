@@ -15,29 +15,30 @@ public sealed class RecipeService
         this.dataManager = dataManager;
     }
 
-    public IReadOnlyDictionary<uint, CraftingRecipe> GetRecipesForItems(IEnumerable<uint> itemIds)
+    public HashSet<uint> GetCraftableItemIds() => dataManager.GetExcelSheet<Recipe>()
+        .Where(r => r.ItemResult.RowId > 0).Select(r => r.ItemResult.RowId).ToHashSet();
+
+    public IReadOnlyDictionary<uint, CraftingRecipe> GetRecipesForItems(IEnumerable<uint> itemIds) =>
+        GetRecipeOptions(itemIds).ToDictionary(pair => pair.Key, pair => pair.Value[0]);
+
+    public IReadOnlyDictionary<uint, IReadOnlyList<CraftingRecipe>> GetRecipeOptions(IEnumerable<uint> itemIds)
     {
-        var wantedItemIds = itemIds.ToHashSet();
-        if (wantedItemIds.Count == 0)
-            return new Dictionary<uint, CraftingRecipe>();
-
-        var recipes = new Dictionary<uint, CraftingRecipe>();
-        foreach (var recipe in dataManager.GetExcelSheet<Recipe>())
-        {
-            var resultItemId = recipe.ItemResult.RowId;
-            if (resultItemId == 0 || !wantedItemIds.Contains(resultItemId) || recipes.ContainsKey(resultItemId))
-                continue;
-
-            recipes[resultItemId] = BuildRecipe(recipe);
-        }
-
-        return recipes;
+        var wanted = itemIds.ToHashSet();
+        return dataManager.GetExcelSheet<Recipe>()
+            .Where(r => r.ItemResult.RowId > 0 && wanted.Contains(r.ItemResult.RowId))
+            .Select(BuildRecipe)
+            .GroupBy(r => r.ResultItemId)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<CraftingRecipe>)g.ToList());
     }
 
     private CraftingRecipe BuildRecipe(Recipe recipe)
     {
         return new CraftingRecipe
         {
+            RecipeId = recipe.RowId,
+            CraftJob = recipe.CraftType.Value.Name.ToString(),
+            CraftLevel = recipe.RecipeLevelTable.Value.ClassJobLevel,
+            CanHq = recipe.CanHq,
             ResultItemId = recipe.ItemResult.RowId,
             AmountResult = recipe.AmountResult <= 0 ? 1 : recipe.AmountResult,
             Ingredients = GetIngredients(recipe),

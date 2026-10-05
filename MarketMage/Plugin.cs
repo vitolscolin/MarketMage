@@ -14,6 +14,9 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
 
+    [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
+    [PluginService] internal static IFramework Framework { get; private set; } = null!;
+
     private const string CommandName = "/marketmage";
 
     public readonly WindowSystem WindowSystem = new("MarketMage");
@@ -21,7 +24,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public Plugin()
     {
-        MainWindow = new MainWindow(DataManager, Log);
+        MainWindow = new MainWindow(DataManager, Log, PluginInterface, PlayerState);
         WindowSystem.AddWindow(MainWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
@@ -29,6 +32,7 @@ public sealed class Plugin : IDalamudPlugin
             HelpMessage = "Open MarketMage.",
         });
 
+        Framework.Update += OnUpdate;
         PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenConfigUi += OpenMainUi;
         PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
@@ -38,6 +42,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        Framework.Update -= OnUpdate;
         CommandManager.RemoveHandler(CommandName);
 
         PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
@@ -47,6 +52,8 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.RemoveAllWindows();
         MainWindow.Dispose();
     }
+
+    private void OnUpdate(IFramework framework) => MainWindow.UpdateOpportunities();
 
     private void OnCommand(string command, string args)
     {

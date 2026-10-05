@@ -1,137 +1,102 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Dalamud.Plugin.Services;
 using MarketMage.Models;
 
 namespace MarketMage.Services;
 
-public sealed class UniversalisService : IDisposable
+public sealed class UniversalisService : IMarketDataClient, IDisposable
 {
-    private readonly HttpClient httpClient = new();
-    private readonly IPluginLog log;
+    private readonly HttpClient httpClient;
+    private readonly SemaphoreSlim requestGate = new(1, 1);
+    private readonly TimeSpan requestInterval;
+    private DateTimeOffset nextRequest;
 
-    public UniversalisService(IPluginLog log)
+    public UniversalisService(HttpClient? client = null, TimeSpan? minimumInterval = null)
     {
-        this.log = log;
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.1");
+        httpClient = client ?? new HttpClient();
+        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.5");
+        requestInterval = minimumInterval ?? TimeSpan.FromSeconds(1);
     }
 
-    public async Task<IReadOnlyList<MarketPriceSnapshot>> GetRecentSaleSnapshotsAsync(
-        string world,
-        IReadOnlyCollection<uint> itemIds,
-        CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyDictionary<uint, AggregateSnapshot?>> GetAggregatesAsync(
+        string scope, IReadOnlyCollection<uint> itemIds, CancellationToken token)
     {
-        var trimmedWorld = world.Trim();
-        if (string.IsNullOrWhiteSpace(trimmedWorld))
-            throw new ArgumentException("World cannot be empty.", nameof(world));
-
-        if (itemIds.Count == 0)
-            return [];
-
-        var itemIdText = string.Join(',', itemIds);
-        var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(trimmedWorld)}/{itemIdText}?listings=0&entries=20";
-
-        log.Information("Fetching Universalis data: {Url}", url);
-
-        using var response = await httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        var snapshotsByItemId = new Dictionary<uint, MarketPriceSnapshot>();
-        var root = document.RootElement;
-
-        if (root.TryGetProperty("items", out var itemsElement) && itemsElement.ValueKind == JsonValueKind.Object)
+        if (string.IsNullOrWhiteSpace(scope)) throw new ArgumentException("Market scope cannot be empty.", nameof(scope));
+        var result = new Dictionary<uint, AggregateSnapshot?>();
+        foreach (var batch in itemIds.Distinct().Chunk(100))
         {
-            foreach (var itemProperty in itemsElement.EnumerateObject())
+            var url = $"https://universalis.app/api/v2/aggregated/{Uri.EscapeDataString(scope)}/{string.Join(',', batch)}";
+            try
             {
-                if (uint.TryParse(itemProperty.Name, NumberStyles.Integer, CultureInfo.InvariantCulture, out var itemId))
-                    snapshotsByItemId[itemId] = ParseSnapshot(itemId, itemProperty.Value);
+                var json = await GetJsonAsync(url, token).ConfigureAwait(false);
+                foreach (var pair in AggregateParser.Parse(json, batch)) result[pair.Key] = pair.Value;
+            }
+            catch (HttpRequestException ex) when (batch.Length == 1 && ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                // Unlike multi-item requests, an unavailable single item may return 404.
+                result[batch[0]] = null;
             }
         }
-        else
-        {
-            var itemId = TryGetItemId(root) ?? itemIds.First();
-            snapshotsByItemId[itemId] = ParseSnapshot(itemId, root);
-        }
-
-        return itemIds
-            .Select(itemId => snapshotsByItemId.TryGetValue(itemId, out var snapshot)
-                ? snapshot
-                : new MarketPriceSnapshot { ItemId = itemId })
-            .ToList();
+        return result;
     }
 
-    public void Dispose()
+    public async Task<IReadOnlyList<uint>> GetRecentItemsAsync(string dataCenter, CancellationToken token)
     {
-        httpClient.Dispose();
+        var url = $"https://universalis.app/api/v2/extra/stats/most-recently-updated?dcName={Uri.EscapeDataString(dataCenter)}&entries=200";
+        var json = await GetJsonAsync(url, token).ConfigureAwait(false);
+        using var document = JsonDocument.Parse(json);
+        if (!document.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new JsonException("Missing recent-item list.");
+        return items.EnumerateArray()
+            .Where(i => i.TryGetProperty("itemID", out var id) && id.TryGetUInt32(out _))
+            .Select(i => i.GetProperty("itemID").GetUInt32()).Distinct().ToArray();
     }
 
-    private static MarketPriceSnapshot ParseSnapshot(uint itemId, JsonElement itemElement)
+    public async Task<IReadOnlyList<MarketPriceSnapshot>> GetSnapshotsAsync(
+        string scope, IReadOnlyCollection<uint> itemIds, bool hq, bool listings, CancellationToken cancellationToken, bool includeHistory = false)
     {
-        if (!itemElement.TryGetProperty("recentHistory", out var historyElement) ||
-            historyElement.ValueKind != JsonValueKind.Array)
+        if (string.IsNullOrWhiteSpace(scope)) throw new ArgumentException("Select a world or data center.", nameof(scope));
+        var result = new List<MarketPriceSnapshot>();
+        foreach (var batch in itemIds.Distinct().Chunk(50))
         {
-            return new MarketPriceSnapshot { ItemId = itemId };
+            var url = $"https://universalis.app/api/v2/{Uri.EscapeDataString(scope)}/{string.Join(',', batch)}?listings={(listings ? 100 : 0)}&entries={(!listings || includeHistory ? 20 : 0)}&hq={hq.ToString().ToLowerInvariant()}";
+            var json = await GetJsonAsync(url, cancellationToken).ConfigureAwait(false);
+            result.AddRange(MarketParser.Parse(json, batch, scope, hq));
         }
+        return result;
+    }
 
-        var prices = new List<int>();
-        DateTimeOffset? lastSaleTime = null;
-
-        foreach (var entry in historyElement.EnumerateArray())
+    private async Task<string> GetJsonAsync(string url, CancellationToken token)
+    {
+        await requestGate.WaitAsync(token).ConfigureAwait(false);
+        try
         {
-            if (entry.TryGetProperty("pricePerUnit", out var priceElement) &&
-                priceElement.TryGetInt32(out var price))
+            for (var attempt = 0; ; attempt++)
             {
-                prices.Add(price);
-            }
-
-            if (entry.TryGetProperty("timestamp", out var timestampElement) &&
-                timestampElement.TryGetInt64(out var timestamp))
-            {
-                var saleTime = DateTimeOffset.FromUnixTimeSeconds(timestamp);
-                if (lastSaleTime is null || saleTime > lastSaleTime)
-                    lastSaleTime = saleTime;
+                var wait = nextRequest - DateTimeOffset.UtcNow;
+                if (wait > TimeSpan.Zero) await Task.Delay(wait, token).ConfigureAwait(false);
+                using var response = await httpClient.GetAsync(url, token).ConfigureAwait(false);
+                nextRequest = DateTimeOffset.UtcNow + requestInterval;
+                if (response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
+                {
+                    var retry = response.Headers.RetryAfter;
+                    var delay = retry?.Delta ?? (retry?.Date - DateTimeOffset.UtcNow) ?? TimeSpan.FromSeconds(attempt + 1);
+                    nextRequest = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(Math.Max(delay.TotalSeconds, 1));
+                    if (attempt < 2) continue;
+                }
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
             }
         }
-
-        return new MarketPriceSnapshot
-        {
-            ItemId = itemId,
-            MedianRecentSalePrice = GetMedian(prices),
-            RecentSalesCount = prices.Count,
-            LastSaleTime = lastSaleTime,
-        };
+        finally { requestGate.Release(); }
     }
 
-    private static uint? TryGetItemId(JsonElement itemElement)
-    {
-        if (itemElement.TryGetProperty("itemID", out var itemIdElement) &&
-            itemIdElement.TryGetUInt32(out var itemId))
-        {
-            return itemId;
-        }
-
-        return null;
-    }
-
-    private static int GetMedian(List<int> prices)
-    {
-        if (prices.Count == 0)
-            return 0;
-
-        prices.Sort();
-        var middle = prices.Count / 2;
-        if (prices.Count % 2 == 1)
-            return prices[middle];
-
-        return (int)Math.Floor((prices[middle - 1] + prices[middle]) / 2m);
-    }
+    public void Dispose() => httpClient.Dispose();
 }

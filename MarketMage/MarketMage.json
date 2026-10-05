@@ -1,8 +1,8 @@
 {
-  "Author": "your name here",
+  "Author": "MarketMage contributors",
   "Name": "MarketMage",
-  "Punchline": "Market-board smoke-test helper for recent shard sales.",
-  "Description": "Opens with /marketmage. Fetches recent Universalis sale history for entered item IDs when Refresh is clicked.",
+  "Punchline": "Automatically find crafting and resale opportunities for gil.",
+  "Description": "Open /marketmage to discover and track gil opportunities. Screen world/DC prices, validate crafting and resale plans, save purchase/craft/list/sold checklists, estimate batch sale times, and optionally inspect Saddlebag regional history.",
   "ApplicableVersion": "any",
   "Tags": [
     "market",
