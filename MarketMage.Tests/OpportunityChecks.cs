@@ -19,9 +19,9 @@ internal static class OpportunityChecks
     private static MarketPriceSnapshot Stock(params MarketListing[] listings) => new() { ItemId = 1, Listings = listings };
     private static IReadOnlyList<GilOpportunity> Evaluate(MarketPriceSnapshot? sale = null, MarketPriceSnapshot? stock = null,
         OpportunitySettings? settings = null, IReadOnlyList<CraftingRecipe>? recipes = null,
-        IReadOnlyDictionary<uint, MarketPriceSnapshot>? ingredients = null, bool hq = false) =>
+        IReadOnlyDictionary<uint, MarketPriceSnapshot>? ingredients = null, bool hq = false, double? dailySales = 40) =>
         OpportunityEngine.Evaluate(Item, hq, "Home", sale ?? Sale(), stock ?? Stock(Listing()), recipes ?? [],
-            ingredients ?? new Dictionary<uint, MarketPriceSnapshot>(), settings ?? Settings, Now);
+            ingredients ?? new Dictionary<uint, MarketPriceSnapshot>(), settings ?? Settings, Now, dailySales);
     private static void Equal<T>(T expected, T actual)
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}; got {actual}");
@@ -92,6 +92,41 @@ internal static class OpportunityChecks
             var row = Evaluate(recipes: [recipe], ingredients: ingredients).Single(r => r.Kind == OpportunityKind.Craft);
             Equal(10, row.CraftCount); Equal(20, row.OutputQuantity); Equal(315L, row.Outlay);
             Equal(3485L, row.Profit); Equal(10u, row.RecipeId);
+        });
+        Test("Slow demand limits crafts using actual recipe yield", () =>
+        {
+            var row = Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 4).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(1, row.CraftCount); Equal(2, row.OutputQuantity);
+            Equal(2d, SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, 25)!.Value);
+        });
+        Test("One craft exceeding sale horizon is withheld", () =>
+            True(!Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 1).Any(r => r.Kind == OpportunityKind.Craft)));
+        Test("Zero or invalid demand cannot recommend crafting", () =>
+        {
+            foreach (var rate in new[] { 0d, -1d, double.NaN, double.PositiveInfinity })
+                True(!Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: rate).Any(r => r.Kind == OpportunityKind.Craft));
+        });
+        Test("Intermediate craft counts are considered", () =>
+        {
+            var row = Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(3, row.CraftCount); Equal(6, row.OutputQuantity);
+        });
+        Test("Per-day ranking avoids larger equal-throughput batches", () =>
+        {
+            var stacks = new Dictionary<uint, MarketPriceSnapshot> { [2] = Stock(Enumerable.Range(1, 10).Select(_ => Listing(price: 10, quantity: 3)).ToArray()) };
+            var row = Evaluate(recipes: [recipe], ingredients: stacks, dailySales: 8).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(1, row.CraftCount);
+        });
+        Test("Missing aggregate demand falls back to sampled units over seven days", () =>
+        {
+            var row = Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: null).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(30d / 7, row.EstimatedDailySales!.Value); Equal(1, row.CraftCount); True(row.UsesSampledDemand);
+        });
+        Test("Stricter share removes previously qualifying craft from book", () =>
+        {
+            var book = new OpportunityBook();
+            book.Apply(new([1u], Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8), 1, 1));
+            True(!book.Current(Now, Settings with { ExpectedMarketSharePercent = 1 }).Any(r => r.Kind == OpportunityKind.Craft));
         });
         Test("Alternate recipes compete on net profit", () =>
         {

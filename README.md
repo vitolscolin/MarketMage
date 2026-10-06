@@ -2,6 +2,18 @@
 
 MarketMage is a Dalamud plugin that finds potential ways to make gil in Final Fantasy XIV. Open `/marketmage` while logged in: the default **Find gil opportunities** view starts scanning automatically, without selecting items first.
 
+## Install through Dalamud
+
+Add this URL under `/xlsettings` → **Experimental** → **Custom Plugin Repositories**, save, then find MarketMage in `/xlplugins`:
+
+```text
+https://github.com/vitolscolin/MarketMage/releases/latest/download/pluginmaster.json
+```
+
+This is a custom repository, not an official Dalamud listing. Disable the development copy before installing the repository version to avoid duplicate plugins. The feed and ZIP downloads are public and need no GitHub login or API key.
+
+Maintainers: bump the project version, commit the changes, and push its matching `vX.Y.Z` tag. The release workflow runs checks, builds the plugin, and generates the feed from the built manifest (including assembly version and Dalamud API level). It publishes `MarketMage.zip` and `pluginmaster.json` together in a GitHub Release. Downloads inside each feed are pinned to that release tag; the install URL above follows the latest release. Never move an existing release tag. To roll back code, publish it under a higher version so installed clients receive an update. Publishing an older tag as latest is not supported.
+
 ## Automatic gil discovery
 
 - Detects your **home world for selling** and **current data center for buying**. If you visit another data center, the source markets change and old results clear.
@@ -11,7 +23,7 @@ MarketMage is a Dalamud plugin that finds potential ways to make gil in Final Fa
 - Ranks preliminary signals using average sale price, current minimum listing price, estimated daily sales velocity, and ingredient costs. Aggregate unit prices are used only to select candidates—not as verified shopping plans.
 - Validates the top 150 candidate items plus 50 rotating lower-ranked candidates, and up to 50 existing/watchlist items (deduplicated). Lower-ranked candidates rotate so repeated false positives cannot monopolize detailed checks.
 - Publishes listing-checked results in batches of 25 and ranks qualifying plans by estimated net gil, then sampled sales activity. Separate counters show catalog items screened, items with home sales data, items with fresh home uploads, source-DC price availability/freshness, and shortlisted items checked against actual listings. Full screening coverage does not mean every item has usable data or that every listing was checked.
-- Compares alternate recipes and batches of 1, 5, and 10 crafts. Shows the recipe, crafting job/level, required craft count, and output quantity.
+- Compares alternate recipes and every batch size from 1–10 crafts. Shows the recipe, crafting job/level, required craft count, and output quantity.
 - Builds a **whole-stack shopping plan**, including which world to visit, quantities, unit prices, and assumed purchase tax. Different ingredients may come from different worlds in your local DC.
 - Filters by gil budget per plan, minimum net profit, minimum ROI, minimum sampled sales, and maximum market-data age. Defaults: 100,000 gil budget, 1,000 gil profit, 10% ROI, three sampled sales in seven days, and data no older than 24 hours.
 - Automatically starts another round 10 minutes after successful completion; a failed round retries after one minute. Pause scanning or use Scan now at any time. Closing the window, switching to manual comparison, logging out, changing scope, or unloading cancels outstanding discovery work.
@@ -37,7 +49,13 @@ The units/day column also shows a batch sale-time scenario:
 
 The visible share slider defaults to **25%**, an editable assumption rather than a measured personal market share. For example, 10 units at 2 units/day takes 5 days at 100% of market sales, or 20 days at a 25% share. Missing, zero, or invalid velocity shows Unknown, not an instant sale. Very slow batches can show more than a year.
 
+Crafting recommendations are capped by this estimate before choosing a batch; resale stacks and previously saved plans can still show longer sale times. Repeating a suggested batch immediately would invalidate its demand allowance. The cap is per plan and does not reserve demand across NQ/HQ, other plans, or existing inventory.
+
 This is a demand-based planning estimate, not a promise: competition, listing price, stack size, changes in demand, and time spent unlisted affect actual sales. The saved monitor applies the latest qualifying local rate (or explicitly labeled saved data) to the original saved batch quantity.
+
+## API access
+
+The integrated Universalis reads and optional Saddlebag Exchange history queries use public endpoints, with **no API key or account required**. Requests go directly from the plugin to those services. Universalis requests are paced at least one second apart with bounded retries and aggregate caching; Saddlebag requests are on demand, paced 30 seconds apart, and cached for 15 minutes. There is no data-upload integration. Saddlebag receives item, home-world, quality, and history-window fields, not your checklist or notes. Public access does not guarantee provider availability or complete market coverage.
 
 ## Additional regional history
 
@@ -61,13 +79,13 @@ The first broad pass can take several minutes: all requests share the one-second
 
 **Resale:** compare each fresh sampled stack on another world in the current DC against selling all its units at home. The plan buys the entire stack and adds an assumed 5% purchase tax. A stack larger than the units observed in the recent sample is excluded. Only the best qualifying sampled stack per item/quality is displayed.
 
-**Crafting:** compare alternate recipes and batches of 1, 5, and 10 crafts. For each ingredient, find the lowest full-stack checkout cost covering the required quantity on a single source world, among the sampled fresh NQ listings. The recipe can source different ingredients from different worlds. The cost includes all purchased stacks plus assumed 5% purchase tax; leftover ingredients are valued at zero. Output quantity cannot exceed observed sampled units. Only the highest-profit qualifying recipe/batch per item/quality is displayed.
+**Crafting:** compare alternate recipes and every batch size from 1–10 crafts. For each ingredient, find the lowest full-stack checkout cost covering the required quantity on a single source world, among the sampled fresh NQ listings. The recipe can source different ingredients from different worlds. The cost includes all purchased stacks plus assumed 5% purchase tax; leftover ingredients are valued at zero. Output quantity cannot exceed observed sampled units. Crafting output must also fit the configured sale horizon (default three days, adjustable 1–7), using the assumed sales share (default 25%). Among eligible batches, choose the highest estimated net gil per sale day, with a one-day minimum divisor and smaller quantities winning ties. This keeps a larger total profit from automatically outweighing a much longer sale time. Changing share or horizon clears results and requires recalculation.
 
 All opportunity results require positive net profit, sufficient stock, complete cost data, and the configured budget/ROI/profit thresholds. The budget applies separately to each plan, not to a combined portfolio of plans. Profit assumes every output unit sells at the estimate. Travel, crafting time, gear, consumables, and recipe unlock costs are excluded. HQ craft results require you to produce HQ outputs; character recipe access and crafting ability are not validated.
 
 Universalis returns up to 100 listings and 20 sales per item/quality/scope in these requests. The seven-day sales figure is the portion of that sample falling in the time window, **not total market volume or a sell-through prediction**. Requests are serialized, paced at least one second apart, batched by up to 50 IDs, and retried at most twice for throttling/server errors while respecting Retry-After. Shared ingredient responses are reused within a scan round. Large rounds can take several minutes.
 
-The opportunity table also shows aggregate estimated units sold per day, separately from the detailed transaction sample used for validation.
+The opportunity table uses fresh home-world, quality-specific aggregate units/day when available. If aggregate demand is missing or stale, it conservatively uses sampled units divided by the seven-day window. Explicit zero or invalid demand does not qualify for crafting. Regional volume is never substituted for home-world demand.
 
 The public market is crowdsourced and can change between upload, scan, and purchase. Recheck the shopping plan before buying. Separate opportunities can depend on the same stock and must not be added together as guaranteed profit. If no plans qualify, the UI reports that honestly rather than filling the list with speculative margins.
 
@@ -143,3 +161,6 @@ These require an actual FFXIV/Dalamud session; compilation, API smoke checks, an
 
 - [Universalis API documentation](https://docs.universalis.app/) and its [v2 schema](https://docs.universalis.app/api/schema/v2): aggregate world/DC screening, sale history, and listings.
 - Dalamud/Lumina: player world/DC, marketable items, recipes, crafting job/level, and HQ capability.
+
+- Verify a slow-moving multi-yield recipe is withheld when one craft exceeds the horizon; changing share/horizon must clear and recompute recommendations.
+- Install and update from the custom repository in a real Dalamud session; automated packaging checks do not verify in-game installation.

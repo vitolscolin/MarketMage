@@ -9,7 +9,7 @@ public static class OpportunityEngine
 {
     public static IReadOnlyList<GilOpportunity> Evaluate(ItemCatalogEntry item, bool hq, string saleWorld,
         MarketPriceSnapshot sale, MarketPriceSnapshot? dcOutput, IReadOnlyList<CraftingRecipe> recipes,
-        IReadOnlyDictionary<uint, MarketPriceSnapshot> ingredients, OpportunitySettings settings, DateTimeOffset now)
+        IReadOnlyDictionary<uint, MarketPriceSnapshot> ingredients, OpportunitySettings settings, DateTimeOffset now, double? dailySales = null)
     {
         if (hq && !item.CanBeHq || !Fresh(sale.UploadedAt, now, settings)) return [];
         var history = sale.Sales.Where(s => s.Price > 0 && s.Quantity > 0 && s.SoldAt <= now && s.SoldAt >= now - settings.SalesWindow).ToList();
@@ -27,6 +27,7 @@ public static class OpportunityEngine
         var baseRow = new GilOpportunity
         {
             ItemId = item.ItemId, ItemName = item.Name, HighQuality = hq, SaleWorld = saleWorld,
+            UsesSampledDemand = !dailySales.HasValue, EstimatedDailySales = dailySales ?? units / settings.SalesWindow.TotalDays,
             SalePrice = salePrice, SampleSales = history.Count, SampleUnits = units, LastSale = lastSale,
             CheckedAt = now, OldestMarketData = new[] { sale.UploadedAt!.Value, cheapest.ReviewedAt!.Value }.Min(),
         };
@@ -46,10 +47,10 @@ public static class OpportunityEngine
         foreach (var recipe in recipes.Where(r => !hq || r.CanHq))
         {
             if (recipe.AmountResult <= 0 || recipe.Ingredients.Count == 0) continue;
-            foreach (var count in new[] { 1, 5, 10 })
+            foreach (var count in Enumerable.Range(1, 10))
             {
                 var output = recipe.AmountResult * count;
-                if (output > units) continue;
+                if (output > units || !FitsCraftDemand(output, baseRow.EstimatedDailySales, settings)) continue;
                 var purchases = new List<PurchaseStep>();
                 var complete = true;
                 var requirements = recipe.Ingredients.GroupBy(i => i.ItemId).Select(g => new RecipeIngredient
@@ -72,7 +73,8 @@ public static class OpportunityEngine
                 if (Eligible(row, settings)) results.Add(row);
             }
         }
-        return results.GroupBy(r => r.Kind).Select(g => g.OrderByDescending(r => r.Profit).ThenByDescending(r => r.Roi).First()).ToList();
+        return results.GroupBy(r => r.Kind).Select(g => g.OrderByDescending(r => r.Kind == OpportunityKind.Craft ? DailyProfit(r, settings) : r.Profit)
+            .ThenBy(r => r.OutputQuantity).ThenByDescending(r => r.Roi).First()).ToList();
     }
 
     // Exact minimum full-stack outlay within the sampled listings, on one world per ingredient.
@@ -105,7 +107,17 @@ public static class OpportunityEngine
         return best;
     }
 
+    public static bool FitsCraftDemand(int quantity, double? dailySales, OpportunitySettings settings) =>
+        SaleTiming.Days(quantity, dailySales, settings.ExpectedMarketSharePercent) is double days &&
+        days <= settings.MaximumCraftSaleDays;
+
+    // A one-day floor avoids implying repeatable intraday turnovers from a short history sample.
+    public static double DailyProfit(GilOpportunity row, OpportunitySettings settings) =>
+        SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, settings.ExpectedMarketSharePercent) is double days
+            ? row.Profit / Math.Max(1, days) : 0;
+
     public static bool Eligible(GilOpportunity row, OpportunitySettings settings) =>
+        (row.Kind != OpportunityKind.Craft || FitsCraftDemand(row.OutputQuantity, row.EstimatedDailySales, settings)) &&
         row.Outlay > 0 && row.Outlay <= settings.Budget && row.Profit > 0 &&
         row.Profit >= settings.MinimumProfit && row.Roi >= settings.MinimumRoi;
 

@@ -7,6 +7,8 @@ public enum OpportunityKind { Craft, Resell }
 
 public sealed record OpportunitySettings
 {
+    public int ExpectedMarketSharePercent { get; init; } = 25;
+    public int MaximumCraftSaleDays { get; init; } = 3;
     public long Budget { get; init; } = 100_000;
     public long MinimumProfit { get; init; } = 1_000;
     public double MinimumRoi { get; init; } = 0.10;
@@ -36,6 +38,7 @@ public sealed record GilOpportunity
     public long Outlay { get; init; }
     public long Profit => Revenue - Outlay;
     public double Roi => Outlay > 0 ? (double)Profit / Outlay : 0;
+    public bool UsesSampledDemand { get; init; }
     public double? EstimatedDailySales { get; init; }
     public int SampleSales { get; init; }
     public long SampleUnits { get; init; }

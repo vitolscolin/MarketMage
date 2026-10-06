@@ -63,6 +63,7 @@ public sealed class OpportunitiesPanel : IDisposable
 
     private OpportunitySettings Settings => new()
     {
+        ExpectedMarketSharePercent = config.ExpectedMarketSharePercent, MaximumCraftSaleDays = config.MaximumCraftSaleDays,
         Budget = config.GilBudget, MinimumProfit = config.MinimumProfit,
         MinimumRoi = config.MinimumRoiPercent / 100d, MinimumSales = config.MinimumSales,
         MaximumDataAge = TimeSpan.FromHours(config.MaximumAgeHours),
@@ -240,15 +241,16 @@ public sealed class OpportunitiesPanel : IDisposable
     private void DrawSettings()
     {
         var budget = config.GilBudget; var profit = config.MinimumProfit; var roi = config.MinimumRoiPercent;
-        var sales = config.MinimumSales; var age = config.MaximumAgeHours;
+        var sales = config.MinimumSales; var age = config.MaximumAgeHours; var days = config.MaximumCraftSaleDays;
         ImGui.SetNextItemWidth(150); var changed = ImGui.InputInt("Gil budget per plan", ref budget, 1000, 10000);
         ImGui.SetNextItemWidth(150); changed |= ImGui.InputInt("Minimum net gil", ref profit, 100, 1000);
         ImGui.SetNextItemWidth(150); changed |= ImGui.InputInt("Minimum ROI %", ref roi);
         ImGui.SetNextItemWidth(150); changed |= ImGui.InputInt("Minimum sampled sales in 7 days", ref sales);
         ImGui.SetNextItemWidth(150); changed |= ImGui.InputInt("Maximum data age (hours)", ref age);
+        ImGui.SetNextItemWidth(150); changed |= ImGui.SliderInt("Maximum crafting batch sale days", ref days, 1, 7);
         if (!changed) return;
         config.GilBudget = budget; config.MinimumProfit = profit; config.MinimumRoiPercent = roi;
-        config.MinimumSales = sales; config.MaximumAgeHours = age;
+        config.MinimumSales = sales; config.MaximumAgeHours = age; config.MaximumCraftSaleDays = days;
         NormalizeSettings(); Suspend(); book.Clear(); nextScan = DateTimeOffset.UtcNow.AddSeconds(2); Save();
     }
 
@@ -266,8 +268,11 @@ public sealed class OpportunitiesPanel : IDisposable
         ImGui.EndDisabled();
         if (!tracked && config.MonitoredOpportunities.Count(e => !e.Sold) >= OpportunityMonitor.MaximumActive)
             ImGui.TextDisabled("Monitor full: complete or remove an active plan to track another.");
+        ImGui.TextWrapped(row.UsesSampledDemand ? "Demand source: sampled home-world sales divided by seven days; incomplete history can understate demand." : "Demand source: home-world aggregate sales velocity for this quality.");
         ImGui.TextWrapped($"Estimated batch sale time: {SaleTiming.Format(SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, config.ExpectedMarketSharePercent))} at {config.ExpectedMarketSharePercent}% of observed market demand. This is a scenario, not a sell-through guarantee.");
         ImGui.TextWrapped($"{row.ItemName}: sell {row.OutputQuantity:N0} {(row.HighQuality ? "HQ" : "NQ")} at an estimated {row.SalePrice:N0} gil each on {row.SaleWorld}.");
+        if (row.Kind == OpportunityKind.Craft)
+            ImGui.TextWrapped($"Batch sizing: {row.CraftCount} crafts x {row.OutputQuantity / row.CraftCount} yield = {row.OutputQuantity} units; within {config.MaximumCraftSaleDays} sale days at your assumed share. Estimated net gil per sale day: {OpportunityEngine.DailyProfit(row, Settings):N0} (one-day minimum). Compared 1–10 crafts; do not repeat this batch before checking demand again. Price drops can reduce the displayed ROI.");
         if (row.Kind == OpportunityKind.Craft)
             ImGui.TextWrapped($"Craft {row.CraftCount} times using recipe {row.RecipeId} ({row.CraftJob}, level {row.CraftLevel}). Buy the stacks below; leftover materials are valued at zero in this plan. Check recipe access and gear; HQ plans require HQ outputs.");
         else ImGui.TextWrapped("Buy the listed stack below, then list it on your home world. The estimated profit assumes all units sell at the displayed price.");
@@ -288,7 +293,7 @@ public sealed class OpportunitiesPanel : IDisposable
         var share = config.ExpectedMarketSharePercent;
         ImGui.SetNextItemWidth(180);
         if (ImGui.SliderInt("Your assumed share of daily sales (%)", ref share, 1, 100))
-        { config.ExpectedMarketSharePercent = share; Save(); }
+        { config.ExpectedMarketSharePercent = share; Suspend(); book.Clear(); nextScan = DateTimeOffset.UtcNow.AddSeconds(2); Save(); }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Batch quantity / (world units per day x your assumed share). Competing sellers and price changes can make actual sales slower. 25% is an editable scenario, not a measured share.");
     }
 
@@ -349,6 +354,7 @@ public sealed class OpportunitiesPanel : IDisposable
 
     private void NormalizeSettings()
     {
+        config.MaximumCraftSaleDays = Math.Clamp(config.MaximumCraftSaleDays, 1, 7);
         config.ExpectedMarketSharePercent = Math.Clamp(config.ExpectedMarketSharePercent, 1, 100);
         config.GilBudget = Math.Clamp(config.GilBudget, 1, 999_999_999);
         config.MinimumProfit = Math.Clamp(config.MinimumProfit, 1, 999_999_999);

@@ -96,12 +96,12 @@ public sealed class OpportunityScanner(IMarketDataClient market)
                 {
                     token.ThrowIfCancellationRequested();
                     var options = recipes.GetValueOrDefault(id) ?? [];
+                    var aggregate = home.GetValueOrDefault(id);
+                    var freshDemand = AggregateScreener.HasFreshSales(aggregate, scope.SaleWorldId, settings, now);
                     if (nq.TryGetValue(id, out var normal))
-                        rows.AddRange(OpportunityEngine.Evaluate(names[id], false, scope.SaleWorld, normal, dcNq.GetValueOrDefault(id), options, ingredientCache, settings, now)
-                            .Select(row => row with { EstimatedDailySales = home.GetValueOrDefault(id)?.Nq.WorldDailySales }));
+                        rows.AddRange(OpportunityEngine.Evaluate(names[id], false, scope.SaleWorld, normal, dcNq.GetValueOrDefault(id), options, ingredientCache, settings, now, freshDemand ? aggregate?.Nq.WorldDailySales : null));
                     if (hq.TryGetValue(id, out var high))
-                        rows.AddRange(OpportunityEngine.Evaluate(names[id], true, scope.SaleWorld, high, dcHq.GetValueOrDefault(id), options, ingredientCache, settings, now)
-                            .Select(row => row with { EstimatedDailySales = home.GetValueOrDefault(id)?.Hq.WorldDailySales }));
+                        rows.AddRange(OpportunityEngine.Evaluate(names[id], true, scope.SaleWorld, high, dcHq.GetValueOrDefault(id), options, ingredientCache, settings, now, freshDemand ? aggregate?.Hq.WorldDailySales : null));
                 }
                 completed += batch.Length;
                 token.ThrowIfCancellationRequested();

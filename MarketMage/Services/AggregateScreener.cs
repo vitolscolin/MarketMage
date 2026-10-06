@@ -57,10 +57,10 @@ public static class AggregateScreener
                         craftCost += price!.Nq.DcMinimum!.Value * 1.05m * ingredient.Quantity;
                     }
                     if (!complete) continue;
-                    foreach (var count in new[] { 1, 5, 10 })
+                    foreach (var count in Enumerable.Range(1, 10))
                     {
                         var quantity = recipe.AmountResult * count;
-                        if (quantity > demand) continue;
+                        if (quantity > demand || !OpportunityEngine.FitsCraftDemand(quantity, sell.WorldDailySales, settings)) continue;
                         score = Math.Max(score, Potential(revenue * quantity, craftCost * count, settings));
                     }
                 }
