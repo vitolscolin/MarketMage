@@ -12,7 +12,7 @@ https://github.com/vitolscolin/MarketMage/releases/latest/download/pluginmaster.
 
 This is a custom repository, not an official Dalamud listing. Disable the development copy before installing the repository version to avoid duplicate plugins. The feed and ZIP downloads are public and need no GitHub login or API key.
 
-Maintainers: bump the project version, commit the changes, and push its matching `vX.Y.Z` tag. The release workflow runs checks, builds the plugin, and generates the feed from the built manifest (including assembly version and Dalamud API level). It publishes `MarketMage.zip` and `pluginmaster.json` together in a GitHub Release. Downloads inside each feed are pinned to that release tag; the install URL above follows the latest release. Never move an existing release tag. To roll back code, publish it under a higher version so installed clients receive an update. Publishing an older tag as latest is not supported.
+Maintainers: bump the project version, commit the changes, and push its matching `vX.Y.Z` tag. The release workflow runs checks, builds the plugin, and generates the feed from the built manifest (including assembly version and Dalamud API level). It publishes `MarketMage.zip`, a standalone `MarketMage.dll`, and `pluginmaster.json` together in a GitHub Release. Downloads inside each feed are pinned to that release tag; the install URL above follows the latest release. Never move an existing release tag. To roll back code, publish it under a higher version so installed clients receive an update. Publishing an older tag as latest is not supported.
 
 ## Automatic gil discovery
 
@@ -39,7 +39,16 @@ Select a returned opportunity and click **Track this opportunity**, then open **
 - Completed plans are hidden by default; enable Show sold plans to view them.
 - The original quantities, shopping plan, profit estimate, and your checklist are preserved. Later scans show the latest qualifying plan separately and never rewrite purchase progress.
 - If a checked item no longer qualifies, the monitor reports **Not qualifying / data unavailable**. If it has not been checked for 15 minutes, it reports **Needs recheck**. Saved plans are not automatically deleted when market opportunities expire.
+- Quantity progress and reservations are described below. Existing saved plans reserve their original output unless completed or explicitly changed to zero.
 - Progress is manual: the plugin does not detect purchases, crafting, retainer listings, or completed sales. Rechecking uses the normal scanner and current filters, not automatic in-game actions.
+
+## Quantities, comparisons, and quick refresh
+
+- **Committed quantities:** Tracking reserves the output quantity. In the monitor, enter cumulative committed, crafted/acquired, listed, and sold output units. Unsold reservation is `max(committed, crafted/acquired, listed) - sold`, floored at zero; listed units are not added again to crafted units. Completing or removing a plan releases its reservation. To watch without reserving, set committed to zero and leave the other quantities zero. Checklist checkboxes remain manual milestones; quantity fields are the source for partial progress.
+- **Remaining demand:** Reservations are grouped by sale world, item, and quality, regardless of source DC or acquisition method. If your three-day allowance is six units and four remain unsold, new crafting must fit the remaining two. Editing reservations cancels current calculations and clears findings for recalculation. The monitor's latest plan describes an **additional batch**, not a repricing of your existing unsold inventory.
+- **Compare crafting batches:** Expand this section under a result to compare recipe, craft count, output, full-stack cost, net gil, ROI, sale time including commitments, and qualification reason. All 1–10 counts are retained for each checked recipe. Missing or unaffordable baskets have unknown costs. The recommended batch is marked; alternatives must not be combined as independent demand allowances.
+- **Break-even and price-drop scenarios:** Under opportunities and saved plans, inspect the break-even unit sale price and profits at unchanged, 5%, 10%, and 20% lower prices. Calculations use full purchase outlay and the same per-unit 5% sale-tax rounding as the engine. They assume every output sells and do not predict demand or sale time at a changed price.
+- **Targeted refresh:** Use Refresh this item now or Refresh tracked items now. This cancels a running scan and retrieves selected output aggregates, detailed world/DC listings, history, and required ingredients without full-catalog screening. Selected aggregate reads bypass the plugin cache, though provider-side data may still be cached. Provider pacing, cancellation, scope checks, and freshness rules still apply. Other findings remain subject to normal expiry. If automatic scanning is enabled, the next scheduled round returns to full discovery.
 
 ## Estimated time to sell a batch
 
@@ -49,7 +58,7 @@ The units/day column also shows a batch sale-time scenario:
 
 The visible share slider defaults to **25%**, an editable assumption rather than a measured personal market share. For example, 10 units at 2 units/day takes 5 days at 100% of market sales, or 20 days at a 25% share. Missing, zero, or invalid velocity shows Unknown, not an instant sale. Very slow batches can show more than a year.
 
-Crafting recommendations are capped by this estimate before choosing a batch; resale stacks and previously saved plans can still show longer sale times. Repeating a suggested batch immediately would invalidate its demand allowance. The cap is per plan and does not reserve demand across NQ/HQ, other plans, or existing inventory.
+Crafting recommendations are capped by this estimate before choosing a batch; resale stacks and previously saved plans can still show longer sale times. Repeating a suggested batch immediately would invalidate its demand allowance. Saved unsold commitments now reduce the allowance for additional crafting on the same sale world and quality, across source DCs and acquisition methods. NQ and HQ demand remains separate. Unrecorded inventory is not counted.
 
 This is a demand-based planning estimate, not a promise: competition, listing price, stack size, changes in demand, and time spent unlisted affect actual sales. The saved monitor applies the latest qualifying local rate (or explicitly labeled saved data) to the original saved batch quantity.
 
@@ -155,7 +164,7 @@ These require an actual FFXIV/Dalamud session; compilation, API smoke checks, an
 - Discovery covers crafting and market resale. Gathering, vendor arbitrage, desynthesis, ventures, and other acquisition methods are not modeled.
 - No recursive subcraft costing, inventory-aware spending, travel optimization, character skill/recipe-unlock validation, or global search across every region.
 - Whole-stack optimization uses the sampled listings, with one world per ingredient; it is not an exhaustive market or multi-world basket optimizer.
-- No automatic trades or guaranteed profits, external alerts, persistent price database, or plugin repository submission setup.
+- No automatic trades or guaranteed profits, external alerts, persistent price database, or official plugin repository submission setup.
 
 ## Data sources
 
@@ -164,3 +173,10 @@ These require an actual FFXIV/Dalamud session; compilation, API smoke checks, an
 
 - Verify a slow-moving multi-yield recipe is withheld when one craft exceeds the horizon; changing share/horizon must clear and recompute recommendations.
 - Install and update from the custom repository in a real Dalamud session; automated packaging checks do not verify in-game installation.
+
+### v0.7 in-game verification
+
+- Reserve four units against a six-unit allowance and verify only two additional units can qualify; test partial sales and completion.
+- Compare batch costs and price-drop outcomes against the displayed shopping plan.
+- Refresh one tracked item during a full scan, then change DC or close the window; verify no cancelled result updates the old scope.
+- Reload the plugin and confirm quantity fields and comparisons persist.

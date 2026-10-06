@@ -21,7 +21,7 @@ public sealed class UniversalisService : IMarketDataClient, IDisposable
     {
         httpClient = client ?? new HttpClient();
         httpClient.Timeout = TimeSpan.FromSeconds(30);
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.6");
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.7");
         requestInterval = minimumInterval ?? TimeSpan.FromSeconds(1);
     }
 

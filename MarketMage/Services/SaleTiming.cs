@@ -4,7 +4,7 @@ namespace MarketMage.Services;
 
 public static class SaleTiming
 {
-    public static double? Days(int quantity, double? unitsPerDay, int marketSharePercent)
+    public static double? Days(long quantity, double? unitsPerDay, int marketSharePercent)
     {
         if (quantity <= 0 || !unitsPerDay.HasValue || !double.IsFinite(unitsPerDay.Value) || unitsPerDay <= 0 ||
             marketSharePercent is < 1 or > 100) return null;

@@ -128,6 +128,32 @@ internal static class OpportunityChecks
             book.Apply(new([1u], Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8), 1, 1));
             True(!book.Current(Now, Settings with { ExpectedMarketSharePercent = 1 }).Any(r => r.Kind == OpportunityKind.Craft));
         });
+        Test("Existing unsold units reduce the new craft allowance", () =>
+        {
+            var reserved = Settings with { CommittedUnits = new Dictionary<(uint, bool), int> { [(1, false)] = 4 } };
+            var row = Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8, settings: reserved).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(2, row.OutputQuantity); Equal(4, row.CommittedUnits);
+            Equal(3d, row.BatchComparisons.Single(b => b.Crafts == 1).Days!.Value);
+            Equal("Exceeds remaining demand", row.BatchComparisons.Single(b => b.Crafts == 2).Status);
+        });
+        Test("Fully reserved demand suppresses additional crafting", () =>
+        {
+            var reserved = Settings with { CommittedUnits = new Dictionary<(uint, bool), int> { [(1, false)] = 6 } };
+            True(!Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8, settings: reserved).Any(r => r.Kind == OpportunityKind.Craft));
+        });
+        Test("Batch comparison retains all ten quantities and exact chosen costs", () =>
+        {
+            var row = Evaluate(recipes: [recipe], ingredients: ingredients, dailySales: 8).Single(r => r.Kind == OpportunityKind.Craft);
+            Equal(10, row.BatchComparisons.Count);
+            var selected = row.BatchComparisons.Single(b => b.Crafts == row.CraftCount);
+            Equal<long?>(row.Outlay, selected.Cost); Equal<long?>(row.Profit, selected.Profit);
+            Equal(row.OutputQuantity, selected.Quantity); Equal("Qualifies", selected.Status);
+        });
+        Test("Missing batch ingredients remain unknown rather than zero cost", () =>
+        {
+            var row = Evaluate(recipes: [recipe]).Single();
+            Equal(10, row.BatchComparisons.Count); True(row.BatchComparisons.All(b => b.Cost == null && b.Profit == null));
+        });
         Test("Alternate recipes compete on net profit", () =>
         {
             var cheaper = new CraftingRecipe { RecipeId = 20, ResultItemId = 1, AmountResult = 2,
@@ -211,6 +237,39 @@ internal static class OpportunityChecks
                 recipeMap, [], 0, Settings, _ => { }, CancellationToken.None);
             Equal(1, fake.IngredientRequests);
         });
+        Async("Targeted refresh only reads selected items and required ingredients and bypasses aggregate cache", async () =>
+        {
+            var fake = new FakeMarket(DateTimeOffset.UtcNow);
+            var scanner = new OpportunityScanner(fake);
+            var catalog = Enumerable.Range(1, 1000).Select(i => new ItemCatalogEntry { ItemId = (uint)i }).ToArray();
+            var map = new Dictionary<uint, IReadOnlyList<CraftingRecipe>> { [1] = [new CraftingRecipe
+                { ResultItemId = 1, AmountResult = 1, Ingredients = [new() { ItemId = 9999, Quantity = 1 }] }] };
+            var updates = new List<ScanUpdate>();
+            for (var i = 0; i < 2; i++)
+            {
+                var result = await scanner.ScanAsync(new("Home", "LocalDC", new HashSet<string> { "Other" }), catalog,
+                    map, [1u], 35, Settings, updates.Add, CancellationToken.None, targeted: true);
+                Equal(1, result.Evaluated); Equal(35, result.NextOffset); Equal<string?>(null, result.Error);
+            }
+            Equal(2, fake.AggregateRequests.Count);
+            True(fake.AggregateRequests.All(ids => ids.SequenceEqual(new[] { 1u })));
+            True(fake.DetailIds.All(id => id is 1 or 9999)); True(fake.DetailIds.Contains(9999u));
+            True(updates.Where(u => u.ItemIds.Count > 0).All(u => u.ItemIds.SequenceEqual(new[] { 1u })));
+            True(updates[^1].Opportunities.Count > 0);
+        });
+        Async("Targeted refresh cancellation cannot publish validated rows", async () =>
+        {
+            using var cancel = new CancellationTokenSource(); var updates = new List<ScanUpdate>();
+            var fake = new FakeMarket(DateTimeOffset.UtcNow) { OnRequest = () => cancel.Cancel() };
+            try
+            {
+                await new OpportunityScanner(fake).ScanAsync(new("Home", "DC", new HashSet<string>()), [Item],
+                    new Dictionary<uint, IReadOnlyList<CraftingRecipe>>(), [1u], 0, Settings, updates.Add, cancel.Token, targeted: true);
+                throw new Exception("Expected cancellation");
+            }
+            catch (OperationCanceledException) { }
+            Equal(0, updates.Count(u => u.ItemIds.Count > 0));
+        });
         Async("Scanner stops after cancellation without publishing a batch", async () =>
         {
             using var cancel = new CancellationTokenSource(); var updates = new List<ScanUpdate>();
@@ -236,12 +295,15 @@ internal static class OpportunityChecks
 
     private sealed class FakeMarket(DateTimeOffset now) : IMarketDataClient
     {
+        public List<uint[]> AggregateRequests { get; } = [];
+        public List<uint> DetailIds { get; } = [];
         public List<string> Scopes { get; } = [];
         public Action? OnRequest { get; init; }
         public int IngredientRequests { get; private set; }
         public Task<IReadOnlyDictionary<uint, AggregateSnapshot?>> GetAggregatesAsync(string scope, IReadOnlyCollection<uint> ids, CancellationToken token)
         {
             OnRequest?.Invoke(); token.ThrowIfCancellationRequested();
+            AggregateRequests.Add(ids.ToArray());
             var quality = new AggregateQuality { WorldMinimum = 201, DcMinimum = 100, DcMinimumWorldId = 1,
                 WorldAverageSale = 200, WorldDailySales = 10, WorldLastSale = now.AddHours(-1) };
             return Task.FromResult<IReadOnlyDictionary<uint, AggregateSnapshot?>>(ids.ToDictionary(id => id, id => (AggregateSnapshot?)new AggregateSnapshot
@@ -250,7 +312,7 @@ internal static class OpportunityChecks
         public Task<IReadOnlyList<MarketPriceSnapshot>> GetSnapshotsAsync(string scope, IReadOnlyCollection<uint> ids,
             bool hq, bool listings, CancellationToken cancellationToken, bool includeHistory = false)
         {
-            OnRequest?.Invoke(); cancellationToken.ThrowIfCancellationRequested(); Scopes.Add(scope);
+            OnRequest?.Invoke(); cancellationToken.ThrowIfCancellationRequested(); Scopes.Add(scope); DetailIds.AddRange(ids);
             if (ids.Contains(99u)) IngredientRequests++;
             return Task.FromResult<IReadOnlyList<MarketPriceSnapshot>>(ids.Select(id => new MarketPriceSnapshot
             {

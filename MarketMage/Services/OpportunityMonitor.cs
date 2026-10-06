@@ -18,6 +18,12 @@ public static class OpportunityMonitor
         return true;
     }
 
+    // Commitments follow the sale world across source DCs and acquisition methods.
+    public static IReadOnlyDictionary<(uint Item, bool Hq), int> Commitments(IEnumerable<MonitoredOpportunity> entries, string world) =>
+        entries.Where(e => !e.Sold && e.SavedPlan.SaleWorld == world)
+            .GroupBy(e => (e.SavedPlan.ItemId, e.SavedPlan.HighQuality))
+            .ToDictionary(g => g.Key, g => (int)Math.Min(int.MaxValue, g.Sum(e => (long)e.UnsoldQuantity)));
+
     public static IEnumerable<uint> Priority(IEnumerable<MonitoredOpportunity> entries, ScanScope scope) =>
         entries.Where(e => !e.Sold && e.SourceDataCenter == scope.DataCenter && e.SavedPlan.SaleWorld == scope.SaleWorld)
             .Select(e => e.SavedPlan.ItemId).Distinct();

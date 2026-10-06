@@ -26,12 +26,14 @@ public static class OpportunityEngine
         var lastSale = history.Max(s => s.SoldAt);
         var baseRow = new GilOpportunity
         {
+            CommittedUnits = settings.CommittedUnits.GetValueOrDefault((item.ItemId, hq)),
             ItemId = item.ItemId, ItemName = item.Name, HighQuality = hq, SaleWorld = saleWorld,
             UsesSampledDemand = !dailySales.HasValue, EstimatedDailySales = dailySales ?? units / settings.SalesWindow.TotalDays,
             SalePrice = salePrice, SampleSales = history.Count, SampleUnits = units, LastSale = lastSale,
             CheckedAt = now, OldestMarketData = new[] { sale.UploadedAt!.Value, cheapest.ReviewedAt!.Value }.Min(),
         };
         var results = new List<GilOpportunity>();
+        var comparisons = new List<BatchComparison>();
         foreach (var listing in dcOutput?.Listings ?? [])
         {
             if (listing.World == saleWorld || listing.Quantity <= 0 || listing.Quantity > units || !Fresh(listing.ReviewedAt, now, settings)) continue;
@@ -50,7 +52,7 @@ public static class OpportunityEngine
             foreach (var count in Enumerable.Range(1, 10))
             {
                 var output = recipe.AmountResult * count;
-                if (output > units || !FitsCraftDemand(output, baseRow.EstimatedDailySales, settings)) continue;
+
                 var purchases = new List<PurchaseStep>();
                 var complete = true;
                 var requirements = recipe.Ingredients.GroupBy(i => i.ItemId).Select(g => new RecipeIngredient
@@ -62,7 +64,13 @@ public static class OpportunityEngine
                     if (basket == null) { complete = false; break; }
                     purchases.AddRange(basket);
                 }
-                if (!complete) continue;
+                if (!complete)
+                {
+                    comparisons.Add(new(recipe.RecipeId, count, output, null, null, null,
+                        SaleTiming.Days((long)output + baseRow.CommittedUnits, baseRow.EstimatedDailySales, settings.ExpectedMarketSharePercent),
+                        "Missing stock/data or over budget"));
+                    continue;
+                }
                 var row = baseRow with
                 {
                     Kind = OpportunityKind.Craft, OutputQuantity = output, CraftCount = count,
@@ -70,11 +78,18 @@ public static class OpportunityEngine
                     Outlay = purchases.Sum(p => p.CostWithTax), Revenue = unitRevenue * output, Purchases = purchases,
                     OldestMarketData = Min(baseRow.OldestMarketData, purchases.Min(p => p.ReviewedAt)),
                 };
-                if (Eligible(row, settings)) results.Add(row);
+                var reason = output > units ? "Exceeds sampled sales" :
+                    !FitsCraftDemand(output, row.EstimatedDailySales, settings, row.CommittedUnits) ? "Exceeds remaining demand" :
+                    row.Outlay > settings.Budget ? "Over budget" :
+                    row.Profit <= 0 || row.Profit < settings.MinimumProfit || row.Roi < settings.MinimumRoi ? "Below profit/ROI filter" : "Qualifies";
+                comparisons.Add(new(recipe.RecipeId, count, output, row.Outlay, row.Profit, row.Roi,
+                    SaleTiming.Days((long)output + row.CommittedUnits, row.EstimatedDailySales, settings.ExpectedMarketSharePercent), reason));
+                if (reason == "Qualifies" && Eligible(row, settings)) results.Add(row);
             }
         }
         return results.GroupBy(r => r.Kind).Select(g => g.OrderByDescending(r => r.Kind == OpportunityKind.Craft ? DailyProfit(r, settings) : r.Profit)
-            .ThenBy(r => r.OutputQuantity).ThenByDescending(r => r.Roi).First()).ToList();
+            .ThenBy(r => r.OutputQuantity).ThenByDescending(r => r.Roi).First())
+            .Select(r => r with { BatchComparisons = comparisons }).ToList();
     }
 
     // Exact minimum full-stack outlay within the sampled listings, on one world per ingredient.
@@ -107,17 +122,17 @@ public static class OpportunityEngine
         return best;
     }
 
-    public static bool FitsCraftDemand(int quantity, double? dailySales, OpportunitySettings settings) =>
-        SaleTiming.Days(quantity, dailySales, settings.ExpectedMarketSharePercent) is double days &&
+    public static bool FitsCraftDemand(int quantity, double? dailySales, OpportunitySettings settings, int committed = 0) =>
+        SaleTiming.Days((long)quantity + committed, dailySales, settings.ExpectedMarketSharePercent) is double days &&
         days <= settings.MaximumCraftSaleDays;
 
     // A one-day floor avoids implying repeatable intraday turnovers from a short history sample.
     public static double DailyProfit(GilOpportunity row, OpportunitySettings settings) =>
-        SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, settings.ExpectedMarketSharePercent) is double days
+        SaleTiming.Days((long)row.OutputQuantity + row.CommittedUnits, row.EstimatedDailySales, settings.ExpectedMarketSharePercent) is double days
             ? row.Profit / Math.Max(1, days) : 0;
 
     public static bool Eligible(GilOpportunity row, OpportunitySettings settings) =>
-        (row.Kind != OpportunityKind.Craft || FitsCraftDemand(row.OutputQuantity, row.EstimatedDailySales, settings)) &&
+        (row.Kind != OpportunityKind.Craft || FitsCraftDemand(row.OutputQuantity, row.EstimatedDailySales, settings, settings.CommittedUnits.GetValueOrDefault((row.ItemId, row.HighQuality)))) &&
         row.Outlay > 0 && row.Outlay <= settings.Budget && row.Profit > 0 &&
         row.Profit >= settings.MinimumProfit && row.Roi >= settings.MinimumRoi;
 

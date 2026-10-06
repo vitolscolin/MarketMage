@@ -7,6 +7,7 @@ public enum OpportunityKind { Craft, Resell }
 
 public sealed record OpportunitySettings
 {
+    public IReadOnlyDictionary<(uint Item, bool Hq), int> CommittedUnits { get; init; } = new Dictionary<(uint, bool), int>();
     public int ExpectedMarketSharePercent { get; init; } = 25;
     public int MaximumCraftSaleDays { get; init; } = 3;
     public long Budget { get; init; } = 100_000;
@@ -20,8 +21,13 @@ public sealed record OpportunitySettings
 public sealed record PurchaseStep(uint ItemId, string ItemName, string World, int Quantity,
     long UnitPrice, long CostWithTax, DateTimeOffset ReviewedAt);
 
+public sealed record BatchComparison(uint RecipeId, int Crafts, int Quantity, long? Cost, long? Profit,
+    double? Roi, double? Days, string Status);
+
 public sealed record GilOpportunity
 {
+    public IReadOnlyList<BatchComparison> BatchComparisons { get; init; } = [];
+    public int CommittedUnits { get; init; }
     public uint ItemId { get; init; }
     public string ItemName { get; init; } = string.Empty;
     public bool HighQuality { get; init; }

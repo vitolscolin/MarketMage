@@ -60,7 +60,7 @@ public static class AggregateScreener
                     foreach (var count in Enumerable.Range(1, 10))
                     {
                         var quantity = recipe.AmountResult * count;
-                        if (quantity > demand || !OpportunityEngine.FitsCraftDemand(quantity, sell.WorldDailySales, settings)) continue;
+                        if (quantity > demand || !OpportunityEngine.FitsCraftDemand(quantity, sell.WorldDailySales, settings, settings.CommittedUnits.GetValueOrDefault((item.ItemId, hq)))) continue;
                         score = Math.Max(score, Potential(revenue * quantity, craftCost * count, settings));
                     }
                 }

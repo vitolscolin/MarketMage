@@ -41,6 +41,7 @@ public sealed class OpportunitiesPanel : IDisposable
     private bool showResales = true;
     private bool showHq = true;
     private string search = string.Empty;
+    private bool targetedScan;
     private bool showMonitor;
     private bool showCompleted;
     private bool disposed;
@@ -63,6 +64,7 @@ public sealed class OpportunitiesPanel : IDisposable
 
     private OpportunitySettings Settings => new()
     {
+        CommittedUnits = OpportunityMonitor.Commitments(config.MonitoredOpportunities, scope?.SaleWorld ?? string.Empty),
         ExpectedMarketSharePercent = config.ExpectedMarketSharePercent, MaximumCraftSaleDays = config.MaximumCraftSaleDays,
         Budget = config.GilBudget, MinimumProfit = config.MinimumProfit,
         MinimumRoi = config.MinimumRoiPercent / 100d, MinimumSales = config.MinimumSales,
@@ -120,7 +122,7 @@ public sealed class OpportunitiesPanel : IDisposable
         {
             rotation = summary!.NextOffset;
             nextScan = DateTimeOffset.UtcNow.AddMinutes(summary.Error == null ? 10 : 1);
-            status = summary.Error ?? $"Round complete: screened {coverage.Screened:N0} items and checked {summary.Evaluated:N0} shortlisted items against listings.";
+            status = summary.Error ?? $"{(targetedScan ? "Targeted refresh" : "Round")} complete: screened {coverage.Screened:N0} items and checked {summary.Evaluated:N0} shortlisted items against listings.";
         }
         if (config.AutoScan && !request.IsRunning && DateTimeOffset.UtcNow >= nextScan) Start();
     }
@@ -138,26 +140,29 @@ public sealed class OpportunitiesPanel : IDisposable
         while (updates.TryDequeue(out _)) { }
     }
 
-    private void Start()
+    private void Start(uint[]? targetIds = null)
     {
-        if (scope == null || request.IsRunning) return;
+        if (scope == null) return;
+        if (targetIds != null) Suspend();
+        if (request.IsRunning) return;
         var activeScope = scope;
         var activeSettings = Settings;
         var activeGeneration = ++generation;
         var offset = rotation;
-        var priority = OpportunityMonitor.Priority(config.MonitoredOpportunities, activeScope)
+        var priority = targetIds ?? OpportunityMonitor.Priority(config.MonitoredOpportunities, activeScope)
             .Concat(book.Current(DateTimeOffset.UtcNow, activeSettings).Select(r => r.ItemId))
             .Concat(config.SelectedItems ?? []).Distinct().ToArray();
+        targetedScan = targetIds != null;
         scanned = total = 0;
-        coverage = new(0, catalog.Count, 0, 0, 0);
+        coverage = new(0, targetIds?.Length ?? catalog.Count, 0, 0, 0);
         phase = ScanPhase.Screening;
-        status = "Screening the full catalog with cached market summaries...";
+        status = targetIds == null ? "Screening the full catalog with cached market summaries..." : "Refreshing selected items and their ingredients...";
         request.Start(token => Task.Run(async () =>
         {
             try
             {
                 return await scanner.ScanAsync(activeScope, catalog, recipes, priority, offset, activeSettings,
-                    update => updates.Enqueue((activeGeneration, update)), token).ConfigureAwait(false);
+                    update => updates.Enqueue((activeGeneration, update)), token, targetIds != null).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception ex)
@@ -195,13 +200,13 @@ public sealed class OpportunitiesPanel : IDisposable
         if (request.IsRunning && total > 0) ImGui.ProgressBar(scanned / (float)total, new Vector2(-1, 0), $"{scanned}/{total}");
         else if (config.AutoScan && nextScan > DateTimeOffset.UtcNow)
             ImGui.TextDisabled($"Next round in {Math.Ceiling((nextScan - DateTimeOffset.UtcNow).TotalMinutes):N0} minutes.");
-        ImGui.TextWrapped($"Catalog screened: {coverage.Screened:N0}/{coverage.CatalogTotal:N0} | Home sales data: {coverage.WithSalesData:N0} | Fresh home data: {coverage.FreshSalesData:N0}");
+        ImGui.TextWrapped($"{(targetedScan ? "Targeted items screened" : "Catalog screened")}: {coverage.Screened:N0}/{coverage.CatalogTotal:N0} | Home sales data: {coverage.WithSalesData:N0} | Fresh home data: {coverage.FreshSalesData:N0}");
         ImGui.TextWrapped($"Source DC price data: {coverage.WithSourcePrices:N0} items | Fresh source data: {coverage.FreshSourcePrices:N0}");
         if (phase == ScanPhase.Validating)
             ImGui.TextWrapped($"Potential candidates: {coverage.Promising:N0} | Detailed checks this round: {scanned:N0}/{total:N0}. Only listing-checked plans appear below.");
         if (ImGui.CollapsingHeader("How these opportunities are calculated"))
         {
-            ImGui.TextWrapped("Every round screens the full catalog using aggregate prices and estimated sales velocity. It then verifies a shortlist against actual listings. The counts distinguish coverage from data availability; screened items may have missing or stale data.");
+            ImGui.TextWrapped("Automatic discovery screens the full catalog using aggregate prices and estimated sales velocity. It then verifies a shortlist against actual listings. The counts distinguish coverage from data availability; screened items may have missing or stale data.");
             ImGui.TextWrapped("Profit includes full-stack purchases and assumed 5% buying/selling taxes. Sale prices are capped below the current lowest home-world listing. Travel and crafting time are excluded.");
         }
         ImGui.Checkbox("Crafting", ref showCrafts); ImGui.SameLine();
@@ -229,7 +234,7 @@ public sealed class OpportunitiesPanel : IDisposable
                 Cell(row.OutputQuantity.ToString("N0")); Cell(row.Outlay.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1), $"+{row.Profit:N0}");
                 Cell(row.Roi.ToString("P0")); Cell(string.Join(", ", row.Purchases.Select(p => p.World).Distinct()));
-                Cell($"{row.EstimatedDailySales?.ToString("N1") ?? "Unknown"}/day | {SaleTiming.Format(SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, config.ExpectedMarketSharePercent))}");
+                Cell($"{row.EstimatedDailySales?.ToString("N1") ?? "Unknown"}/day | {SaleTiming.Format(SaleTiming.Days((long)row.OutputQuantity + row.CommittedUnits, row.EstimatedDailySales, config.ExpectedMarketSharePercent))}");
                 Cell($"{Math.Max(0, (DateTimeOffset.UtcNow - row.CheckedAt).TotalMinutes):F0}m ago");
             }
             ImGui.EndTable();
@@ -258,26 +263,31 @@ public sealed class OpportunitiesPanel : IDisposable
     {
         regionalHistory.Draw(row);
         ImGui.Separator();
+        ImGui.TextWrapped("Tracking reserves this batch against future crafting demand. Set committed quantity to zero in the monitor to watch without reserving.");
+        if (ImGui.Button("Refresh this item now")) Start([row.ItemId]);
         var tracked = config.MonitoredOpportunities.Any(e => !e.Sold && OpportunityMonitor.Matches(e, row, scope!.DataCenter));
         ImGui.BeginDisabled(tracked || config.MonitoredOpportunities.Count(e => !e.Sold) >= OpportunityMonitor.MaximumActive);
         if (ImGui.Button(tracked ? "On monitor list" : "Track this opportunity"))
         {
             OpportunityMonitor.Add(config.MonitoredOpportunities, row, scope!.DataCenter, DateTimeOffset.UtcNow);
-            Save();
+            CommitmentsChanged();
         }
         ImGui.EndDisabled();
         if (!tracked && config.MonitoredOpportunities.Count(e => !e.Sold) >= OpportunityMonitor.MaximumActive)
             ImGui.TextDisabled("Monitor full: complete or remove an active plan to track another.");
         ImGui.TextWrapped(row.UsesSampledDemand ? "Demand source: sampled home-world sales divided by seven days; incomplete history can understate demand." : "Demand source: home-world aggregate sales velocity for this quality.");
-        ImGui.TextWrapped($"Estimated batch sale time: {SaleTiming.Format(SaleTiming.Days(row.OutputQuantity, row.EstimatedDailySales, config.ExpectedMarketSharePercent))} at {config.ExpectedMarketSharePercent}% of observed market demand. This is a scenario, not a sell-through guarantee.");
+        ImGui.TextWrapped($"Estimated sale time including committed units: {SaleTiming.Format(SaleTiming.Days((long)row.OutputQuantity + row.CommittedUnits, row.EstimatedDailySales, config.ExpectedMarketSharePercent))} at {config.ExpectedMarketSharePercent}% of observed market demand. This is a scenario, not a sell-through guarantee.");
         ImGui.TextWrapped($"{row.ItemName}: sell {row.OutputQuantity:N0} {(row.HighQuality ? "HQ" : "NQ")} at an estimated {row.SalePrice:N0} gil each on {row.SaleWorld}.");
+        DrawComparisons(row);
+        DrawPriceScenarios(row);
+        ImGui.TextWrapped($"Already committed and unsold: {row.CommittedUnits:N0} units. Demand allowance includes those units before any new batch.");
         if (row.Kind == OpportunityKind.Craft)
             ImGui.TextWrapped($"Batch sizing: {row.CraftCount} crafts x {row.OutputQuantity / row.CraftCount} yield = {row.OutputQuantity} units; within {config.MaximumCraftSaleDays} sale days at your assumed share. Estimated net gil per sale day: {OpportunityEngine.DailyProfit(row, Settings):N0} (one-day minimum). Compared 1–10 crafts; do not repeat this batch before checking demand again. Price drops can reduce the displayed ROI.");
         if (row.Kind == OpportunityKind.Craft)
             ImGui.TextWrapped($"Craft {row.CraftCount} times using recipe {row.RecipeId} ({row.CraftJob}, level {row.CraftLevel}). Buy the stacks below; leftover materials are valued at zero in this plan. Check recipe access and gear; HQ plans require HQ outputs.");
         else ImGui.TextWrapped("Buy the listed stack below, then list it on your home world. The estimated profit assumes all units sell at the displayed price.");
         ImGui.TextWrapped($"Revenue after sale tax: {row.Revenue:N0} − full purchase cost: {row.Outlay:N0} = estimated net gil: {row.Profit:N0}. Last sampled sale: {row.LastSale.LocalDateTime:g}; oldest source: {row.OldestMarketData.LocalDateTime:g}.");
-        ImGui.TextWrapped($"Listing verification used {row.SampleSales} sampled sales / {row.SampleUnits:N0} units in 7 days. Units/day is Universalis's estimate from the last 4 days, not guaranteed demand. Recheck listings before buying; plans can compete for the same stock.");
+        ImGui.TextWrapped($"Listing verification used {row.SampleSales} sampled sales / {row.SampleUnits:N0} units in 7 days. Units/day uses the demand source labeled above, not guaranteed demand. Recheck listings before buying; plans can compete for the same stock.");
         if (!ImGui.BeginTable("shopping-plan", 5, TableFlags, new Vector2(0, 150))) return;
         Headers("Buy item", "World", "Whole stack qty", "Unit price", "Cost incl. tax");
         foreach (var step in row.Purchases)
@@ -304,8 +314,8 @@ public sealed class OpportunitiesPanel : IDisposable
         ImGui.Checkbox("Show sold plans", ref showCompleted);
         if (scope != null)
         {
-            ImGui.SameLine(); ImGui.BeginDisabled(request.IsRunning);
-            if (ImGui.Button("Recheck with next scan")) Start();
+            ImGui.SameLine(); ImGui.BeginDisabled(!OpportunityMonitor.Priority(config.MonitoredOpportunities, scope).Any());
+            if (ImGui.Button("Refresh tracked items now")) Start(OpportunityMonitor.Priority(config.MonitoredOpportunities, scope).ToArray());
             ImGui.EndDisabled();
         }
         if (config.MonitoredOpportunities.Count == 0) ImGui.TextWrapped("Select an opportunity and click Track this opportunity to save it here.");
@@ -319,10 +329,29 @@ public sealed class OpportunitiesPanel : IDisposable
                 if (scope == null || entry.SourceDataCenter != scope.DataCenter || plan.SaleWorld != scope.SaleWorld)
                     ImGui.TextWrapped("Monitoring pauses for this entry until your sale world and source DC match its saved scope.");
                 ImGui.TextWrapped($"Saved plan: {plan.OutputQuantity:N0} output units, cost {plan.Outlay:N0}, estimated profit {plan.Profit:N0} gil. Saved {entry.SavedAt.LocalDateTime:g}.");
+                if (scope != null && entry.SourceDataCenter == scope.DataCenter && plan.SaleWorld == scope.SaleWorld &&
+                    ImGui.Button("Refresh this tracked item now")) Start([plan.ItemId]);
+                var committed = entry.CommittedQuantity ?? plan.OutputQuantity;
+                var produced = entry.CraftedQuantity; var listedUnits = entry.ListedQuantity; var soldUnits = entry.SoldQuantity;
+                ImGui.TextWrapped("Quantities are cumulative and overlap: listed units are included in produced/committed units. Unsold = greatest of these quantities minus units sold. Tracking reserves the saved batch by default; set committed to zero for interest only.");
+                var quantitiesChanged = ImGui.InputInt("Committed output units", ref committed);
+                quantitiesChanged |= ImGui.InputInt("Crafted / acquired output units", ref produced);
+                quantitiesChanged |= ImGui.InputInt("Listed output units", ref listedUnits);
+                quantitiesChanged |= ImGui.InputInt("Sold output units", ref soldUnits);
+                if (quantitiesChanged)
+                {
+                    entry.CommittedQuantity = Math.Clamp(committed, 0, 999999);
+                    entry.CraftedQuantity = Math.Clamp(produced, 0, 999999);
+                    entry.ListedQuantity = Math.Clamp(listedUnits, 0, 999999);
+                    entry.SoldQuantity = Math.Clamp(soldUnits, 0, Math.Max(entry.CommittedQuantity.Value, Math.Max(entry.CraftedQuantity, entry.ListedQuantity)));
+                    CommitmentsChanged();
+                }
+                ImGui.TextWrapped($"Reserved unsold units: {entry.UnsoldQuantity:N0}. Completion releases this reservation.");
+                DrawPriceScenarios(plan);
                 var latest = entry.LatestPlan;
                 var rate = latest?.EstimatedDailySales ?? plan.EstimatedDailySales;
-                ImGui.TextWrapped($"Saved batch sale-time scenario: {SaleTiming.Format(SaleTiming.Days(plan.OutputQuantity, rate, config.ExpectedMarketSharePercent))} at {config.ExpectedMarketSharePercent}% share; {rate?.ToString("N1") ?? "unknown"} units/day (latest qualifying estimate, otherwise saved data).");
-                if (latest != null) ImGui.TextWrapped($"Latest qualifying plan: {latest.OutputQuantity:N0} units, cost {latest.Outlay:N0}, profit {latest.Profit:N0}. Your saved plan and checkboxes have not changed.");
+                ImGui.TextWrapped($"Remaining unsold sale-time scenario: {SaleTiming.Format(SaleTiming.Days(entry.UnsoldQuantity, rate, config.ExpectedMarketSharePercent))} at {config.ExpectedMarketSharePercent}% share; {rate?.ToString("N1") ?? "unknown"} units/day (latest qualifying estimate, otherwise saved data).");
+                if (latest != null) ImGui.TextWrapped($"Latest qualifying additional batch: {latest.OutputQuantity:N0} units, cost {latest.Outlay:N0}, profit {latest.Profit:N0}. Your saved plan and checkboxes have not changed.");
                 for (var i = 0; i < plan.Purchases.Count; i++)
                 {
                     var step = plan.Purchases[i];
@@ -341,15 +370,50 @@ public sealed class OpportunitiesPanel : IDisposable
                 var cannotReopen = sold && (config.MonitoredOpportunities.Count(e => !e.Sold) >= OpportunityMonitor.MaximumActive ||
                     config.MonitoredOpportunities.Any(e => !e.Sold && e.Id != entry.Id && OpportunityMonitor.Matches(e, plan, entry.SourceDataCenter)));
                 ImGui.BeginDisabled(cannotReopen);
-                if (ImGui.Checkbox("Sold / completed", ref sold)) { entry.Sold = sold; Save(); }
+                if (ImGui.Checkbox("Sold / completed", ref sold)) { entry.Sold = sold; CommitmentsChanged(); }
                 ImGui.EndDisabled();
                 if (cannotReopen) ImGui.TextDisabled("To reopen, free an active slot and remove any active duplicate of this plan.");
                 var notes = entry.Notes;
                 if (ImGui.InputText("Notes", ref notes, 500)) { entry.Notes = notes; Save(); }
-                if (ImGui.Button("Remove saved plan")) { config.MonitoredOpportunities.Remove(entry); Save(); }
+                if (ImGui.Button("Remove saved plan")) { config.MonitoredOpportunities.Remove(entry); CommitmentsChanged(); }
             }
             ImGui.PopID();
         }
+    }
+
+    private void CommitmentsChanged()
+    {
+        Suspend(); book.Clear();
+        foreach (var entry in config.MonitoredOpportunities) { entry.LastCheckedAt = null; entry.LatestPlan = null; }
+        nextScan = DateTimeOffset.UtcNow.AddSeconds(2); Save();
+    }
+
+    private static void DrawPriceScenarios(GilOpportunity row)
+    {
+        if (!ImGui.CollapsingHeader("Break-even and price-drop scenarios")) return;
+        ImGui.TextWrapped($"Break-even sale price per unit: {PriceScenarios.BreakEven(row)?.ToString("N0") ?? "Unknown"} gil, including assumed 5% sale tax and the full purchase cost. Assumes every unit sells; sale time is not predicted for price changes.");
+        if (!ImGui.BeginTable("price-scenarios", 3, TableFlags, new Vector2(0, 125))) return;
+        Headers("Price drop", "Sale price / unit", "Net gil");
+        foreach (var drop in new[] { 0, 5, 10, 20 })
+        {
+            ImGui.TableNextRow(); Cell($"{drop}%"); Cell(PriceScenarios.SalePrice(row, drop).ToString("N0")); Cell(PriceScenarios.Profit(row, drop).ToString("N0"));
+        }
+        ImGui.EndTable();
+    }
+
+    private static void DrawComparisons(GilOpportunity row)
+    {
+        if (row.BatchComparisons.Count == 0 || !ImGui.CollapsingHeader("Compare crafting batches")) return;
+        ImGui.TextWrapped("Batches from the checked recipes and listings. Unknown costs mean missing stock/data or an ingredient basket beyond your budget. Sale time includes existing unsold commitments. Alternatives are comparisons, not additional recommendations to combine.");
+        if (!ImGui.BeginTable("batch-comparisons", 8, TableFlags, new Vector2(0, 200))) return;
+        Headers("Recipe", "Crafts", "Output", "Cost", "Net gil", "ROI", "Sale time", "Result");
+        foreach (var batch in row.BatchComparisons)
+        {
+            ImGui.TableNextRow(); Cell(batch.RecipeId.ToString()); Cell(batch.Crafts.ToString()); Cell(batch.Quantity.ToString());
+            Cell(batch.Cost?.ToString("N0") ?? "Unknown"); Cell(batch.Profit?.ToString("N0") ?? "Unknown"); Cell(batch.Roi?.ToString("P0") ?? "Unknown"); Cell(SaleTiming.Format(batch.Days));
+            Cell(row.Kind == OpportunityKind.Craft && batch.RecipeId == row.RecipeId && batch.Crafts == row.CraftCount ? "Recommended" : batch.Status);
+        }
+        ImGui.EndTable();
     }
 
     private void NormalizeSettings()

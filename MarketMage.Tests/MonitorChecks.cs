@@ -16,6 +16,41 @@ internal static class MonitorChecks
             OutputQuantity = 10, EstimatedDailySales = 2, Outlay = 100, Revenue = 500,
             Purchases = [new(2, "Ingredient", "Other", 3, 10, 32, now)] };
         var scope = new ScanScope("Home", "DC", new HashSet<string> { "Home", "Other" });
+        Test("Commitments overlap quantities and follow sale world across DCs and methods", () =>
+        {
+            var entries = new List<MonitoredOpportunity>
+            {
+                new() { SavedPlan = plan, SourceDataCenter = "DC", CommittedQuantity = 6, CraftedQuantity = 4, ListedQuantity = 4, SoldQuantity = 2 },
+                new() { SavedPlan = plan with { Kind = OpportunityKind.Resell }, SourceDataCenter = "OtherDC", CommittedQuantity = 3 },
+                new() { SavedPlan = plan with { HighQuality = true }, CommittedQuantity = 8 },
+                new() { SavedPlan = plan with { SaleWorld = "Elsewhere" }, CommittedQuantity = 99 },
+                new() { SavedPlan = plan, CommittedQuantity = 99, Sold = true },
+            };
+            var units = OpportunityMonitor.Commitments(entries, "Home");
+            Equal(7, units[(1, false)]); Equal(8, units[(1, true)]); Equal(4, entries[0].UnsoldQuantity);
+        });
+        Test("Old saved plans reserve their original batch and can opt out", () =>
+        {
+            var entry = JsonSerializer.Deserialize<MonitoredOpportunity>("{\"SavedPlan\":{\"OutputQuantity\":6}}")!;
+            Equal(6, entry.UnsoldQuantity); entry.CommittedQuantity = 0; Equal(0, entry.UnsoldQuantity);
+        });
+        Test("Quantity progress persists and sold units release reservations", () =>
+        {
+            var entry = new MonitoredOpportunity { SavedPlan = plan, CommittedQuantity = 10, CraftedQuantity = 7, ListedQuantity = 5, SoldQuantity = 3 };
+            var loaded = JsonSerializer.Deserialize<MonitoredOpportunity>(JsonSerializer.Serialize(entry))!;
+            Equal(7, loaded.UnsoldQuantity); Equal(5, loaded.ListedQuantity);
+            loaded.SoldQuantity = 10; Equal(0, loaded.UnsoldQuantity);
+        });
+        Test("Break-even honors per-unit tax rounding and full batch outlay", () =>
+        {
+            var row = plan with { OutputQuantity = 3, Outlay = 100, SalePrice = 40 };
+            Equal<long?>(36, PriceScenarios.BreakEven(row));
+            Equal(2L, PriceScenarios.Profit(row with { SalePrice = 36 }, 0));
+            Equal(-1L, PriceScenarios.Profit(row with { SalePrice = 35 }, 0));
+            Equal(14L, PriceScenarios.Profit(row, 0)); Equal(8L, PriceScenarios.Profit(row, 5));
+            Equal(2L, PriceScenarios.Profit(row, 10)); Equal(-10L, PriceScenarios.Profit(row, 20));
+            Equal<long?>(null, PriceScenarios.BreakEven(row with { OutputQuantity = 0 }));
+        });
         Test("Batch estimate accounts for quantity and chosen market share", () =>
         { Equal<double?>(5, SaleTiming.Days(10, 2, 100)); Equal<double?>(20, SaleTiming.Days(10, 2, 25)); });
         Test("Unknown zero and invalid demand do not produce a fake ETA", () =>

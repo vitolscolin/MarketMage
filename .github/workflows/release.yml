@@ -39,5 +39,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME release/MarketMage.zip release/pluginmaster.json --verify-tag --title "MarketMage $env:GITHUB_REF_NAME" --generate-notes --latest
+          gh release create $env:GITHUB_REF_NAME release/MarketMage.zip release/pluginmaster.json MarketMage/bin/x64/Release/MarketMage.dll --verify-tag --title "MarketMage $env:GITHUB_REF_NAME" --generate-notes --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -39,7 +39,7 @@ public sealed class OpportunityScanner(IMarketDataClient market)
 
     public async Task<ScanSummary> ScanAsync(ScanScope scope, IReadOnlyList<ItemCatalogEntry> catalog,
         IReadOnlyDictionary<uint, IReadOnlyList<CraftingRecipe>> recipes, IEnumerable<uint> priority,
-        int offset, OpportunitySettings settings, Action<ScanUpdate> report, CancellationToken token)
+        int offset, OpportunitySettings settings, Action<ScanUpdate> report, CancellationToken token, bool targeted = false)
     {
         var completed = 0;
         var total = 0;
@@ -50,6 +50,7 @@ public sealed class OpportunityScanner(IMarketDataClient market)
             var source = new Dictionary<uint, AggregateSnapshot?>();
             var sameDc = scope.SaleDataCenter == null || scope.SaleDataCenter == scope.DataCenter;
             var allIds = catalog.Select(i => i.ItemId).Distinct().ToArray();
+            if (targeted) allIds = allIds.Intersect(priority).ToArray();
             var priorityIds = priority.Distinct().ToArray();
             var ordered = priorityIds.Where(allIds.Contains).Concat(allIds).Distinct().ToArray();
             var coverage = new ScanCoverage(0, allIds.Length, 0, 0, 0);
@@ -57,8 +58,8 @@ public sealed class OpportunityScanner(IMarketDataClient market)
             foreach (var batch in ordered.Chunk(ScreeningBatchSize))
             {
                 token.ThrowIfCancellationRequested();
-                foreach (var pair in await GetAggregatesAsync(scope.SaleWorld, batch, token).ConfigureAwait(false)) home[pair.Key] = pair.Value;
-                if (!sameDc)
+                foreach (var pair in await GetAggregatesAsync(scope.SaleWorld, batch, token, targeted).ConfigureAwait(false)) home[pair.Key] = pair.Value;
+                if (!sameDc && !targeted)
                     foreach (var pair in await GetAggregatesAsync(scope.DataCenter, batch, token).ConfigureAwait(false)) source[pair.Key] = pair.Value;
                 var now = DateTimeOffset.UtcNow;
                 coverage = new ScanCoverage(home.Count, allIds.Length, home.Values.Count(v => v?.HasSaleData == true),
@@ -70,8 +71,8 @@ public sealed class OpportunityScanner(IMarketDataClient market)
             }
             if (sameDc) source = home;
             token.ThrowIfCancellationRequested();
-            var ranked = AggregateScreener.Rank(catalog, recipes, home, source, scope, settings, DateTimeOffset.UtcNow);
-            var ids = PlanValidation(ranked, priorityIds, allIds.ToHashSet(), offset);
+            var ranked = targeted ? Array.Empty<ScreenCandidate>() : AggregateScreener.Rank(catalog, recipes, home, source, scope, settings, DateTimeOffset.UtcNow);
+            var ids = targeted ? allIds : PlanValidation(ranked, priorityIds, allIds.ToHashSet(), offset);
             var names = catalog.ToDictionary(i => i.ItemId);
             coverage = coverage with { Promising = ranked.Count };
             total = ids.Length;
@@ -108,7 +109,7 @@ public sealed class OpportunityScanner(IMarketDataClient market)
                 report(new(batch, rows, completed, total) { Coverage = coverage });
             }
             var remainder = Math.Max(0, ranked.Count - TopCandidates);
-            var nextOffset = remainder == 0 ? 0 : (offset + Math.Min(RotatingCandidates, remainder)) % remainder;
+            var nextOffset = targeted ? offset : remainder == 0 ? 0 : (offset + Math.Min(RotatingCandidates, remainder)) % remainder;
             return new ScanSummary(completed, total, nextOffset, null);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -118,13 +119,13 @@ public sealed class OpportunityScanner(IMarketDataClient market)
         }
     }
 
-    private async Task<IReadOnlyDictionary<uint, AggregateSnapshot?>> GetAggregatesAsync(string scope, uint[] ids, CancellationToken token)
+    private async Task<IReadOnlyDictionary<uint, AggregateSnapshot?>> GetAggregatesAsync(string scope, uint[] ids, CancellationToken token, bool force = false)
     {
         var values = new Dictionary<uint, AggregateSnapshot?>();
         var missing = new List<uint>();
         var now = DateTimeOffset.UtcNow;
         foreach (var id in ids)
-            if (cache.TryGet(scope, id, now, out var snapshot)) values[id] = snapshot;
+            if (!force && cache.TryGet(scope, id, now, out var snapshot)) values[id] = snapshot;
             else missing.Add(id);
         if (missing.Count > 0)
         {

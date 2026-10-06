@@ -19,6 +19,7 @@
     <Compile Include="../MarketMage/Services/OpportunityScanner.cs" Link="Services/OpportunityScanner.cs" />
     <Compile Include="../MarketMage/Services/OpportunityBook.cs" Link="Services/OpportunityBook.cs" />
     <Compile Include="../MarketMage/Services/OpportunityMonitor.cs" Link="Services/OpportunityMonitor.cs" />
+    <Compile Include="../MarketMage/Services/PriceScenarios.cs" Link="Services/PriceScenarios.cs" />
     <Compile Include="../MarketMage/Services/SaleTiming.cs" Link="Services/SaleTiming.cs" />
     <Compile Include="../MarketMage/Services/RegionalHistoryService.cs" Link="Services/RegionalHistoryService.cs" />
     <Compile Include="../MarketMage/Services/LatestRequest.cs" Link="Services/LatestRequest.cs" />
