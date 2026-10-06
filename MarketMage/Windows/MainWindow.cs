@@ -58,7 +58,7 @@ public sealed class MainWindow : Window, IDisposable
         selected = (config.SelectedItems ?? []).Where(validIds.Contains).Take(MaxSelection).ToHashSet();
         opportunities = new OpportunitiesPanel(playerState, market, catalog, recipes.GetRecipeOptions(validIds),
             worlds.GroupBy(w => w.DataCenter).ToDictionary(g => g.Key, g => (IReadOnlySet<string>)g.Select(w => w.Name).ToHashSet()), config, pluginInterface, log);
-        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(1050, 650), MaximumSize = new Vector2(float.MaxValue) };
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(900, 650), MaximumSize = new Vector2(float.MaxValue) };
     }
 
     public void Dispose()
@@ -81,9 +81,11 @@ public sealed class MainWindow : Window, IDisposable
     public override void Draw()
     {
         var previousMode = manualMode;
-        if (ImGui.RadioButton("Find gil opportunities", !manualMode)) manualMode = false;
+        if (ImGui.RadioButton("Discover", !manualMode && !opportunities.ShowMonitor)) { manualMode = false; opportunities.ShowMonitor = false; }
         ImGui.SameLine();
-        if (ImGui.RadioButton("Manual comparison", manualMode)) manualMode = true;
+        if (ImGui.RadioButton($"My plans ({opportunities.ActivePlanCount})", !manualMode && opportunities.ShowMonitor)) { manualMode = false; opportunities.ShowMonitor = true; }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Item lookup", manualMode)) manualMode = true;
         if (previousMode != manualMode)
         {
             if (manualMode) opportunities.Suspend();
@@ -96,6 +98,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawManual()
     {
+        ImGui.TextWrapped("Choose items to compare market prices. For a full-stack shopping plan with demand limits, use Discover.");
         if (refresh.TryTake(out var completed))
         {
             estimates = completed.Estimates;

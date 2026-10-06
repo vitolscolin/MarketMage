@@ -23,7 +23,7 @@ public sealed class RegionalHistoryService : IDisposable
     {
         this.client = client ?? new HttpClient();
         this.client.Timeout = TimeSpan.FromSeconds(45);
-        this.client.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.7");
+        this.client.DefaultRequestHeaders.UserAgent.ParseAdd("MarketMage/0.8");
         this.interval = interval ?? TimeSpan.FromSeconds(30);
     }
 

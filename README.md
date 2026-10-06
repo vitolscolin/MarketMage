@@ -1,6 +1,6 @@
 # MarketMage
 
-MarketMage is a Dalamud plugin that finds potential ways to make gil in Final Fantasy XIV. Open `/marketmage` while logged in: the default **Find gil opportunities** view starts scanning automatically, without selecting items first.
+MarketMage is a Dalamud plugin that finds potential ways to make gil in Final Fantasy XIV. Open `/marketmage` while logged in: the default **Discover** view starts scanning automatically, without selecting items first.
 
 ## Install through Dalamud
 
@@ -33,7 +33,7 @@ Automatic scanning performs public market-data analysis only. MarketMage does no
 
 ## Saved monitor and checklist
 
-Select a returned opportunity and click **Track this opportunity**, then open **Monitor / checklist**. Up to 50 active plans are saved in Dalamud configuration and prioritized for detailed checks when their sale world and source DC match your current scope.
+Select a returned opportunity and choose **Watch item** (no reservation) or **Plan this batch** (reserve output), then open **My plans**. Up to 50 active plans are saved in Dalamud configuration and prioritized for detailed checks when their sale world and source DC match your current scope.
 
 - Mark individual shopping stacks purchased, crafting completed, listing completed, and sold/completed. Add notes or remove a plan.
 - Completed plans are hidden by default; enable Show sold plans to view them.
@@ -44,7 +44,7 @@ Select a returned opportunity and click **Track this opportunity**, then open **
 
 ## Quantities, comparisons, and quick refresh
 
-- **Committed quantities:** Tracking reserves the output quantity. In the monitor, enter cumulative committed, crafted/acquired, listed, and sold output units. Unsold reservation is `max(committed, crafted/acquired, listed) - sold`, floored at zero; listed units are not added again to crafted units. Completing or removing a plan releases its reservation. To watch without reserving, set committed to zero and leave the other quantities zero. Checklist checkboxes remain manual milestones; quantity fields are the source for partial progress.
+- **Committed quantities:** **Plan this batch** reserves the output quantity; **Watch item** saves with zero reserved units. In the monitor, enter cumulative committed, crafted/acquired, listed, and sold output units. Unsold reservation is `max(committed, crafted/acquired, listed) - sold`, floored at zero; listed units are not added again to crafted units. Completing or removing a plan releases its reservation. To watch without reserving, set committed to zero and leave the other quantities zero. Checklist checkboxes remain manual milestones; quantity fields are the source for partial progress.
 - **Remaining demand:** Reservations are grouped by sale world, item, and quality, regardless of source DC or acquisition method. If your three-day allowance is six units and four remain unsold, new crafting must fit the remaining two. Editing reservations cancels current calculations and clears findings for recalculation. The monitor's latest plan describes an **additional batch**, not a repricing of your existing unsold inventory.
 - **Compare crafting batches:** Expand this section under a result to compare recipe, craft count, output, full-stack cost, net gil, ROI, sale time including commitments, and qualification reason. All 1–10 counts are retained for each checked recipe. Missing or unaffordable baskets have unknown costs. The recommended batch is marked; alternatives must not be combined as independent demand allowances.
 - **Break-even and price-drop scenarios:** Under opportunities and saved plans, inspect the break-even unit sale price and profits at unchanged, 5%, 10%, and 20% lower prices. Calculations use full purchase outlay and the same per-unit 5% sale-tax rounding as the engine. They assume every output sells and do not predict demand or sale time at a changed price.
@@ -100,7 +100,7 @@ The public market is crowdsourced and can change between upload, scan, and purch
 
 ## Manual comparison
 
-The **Manual comparison** view remains available for targeted investigation:
+The **Item lookup** view remains available for targeted investigation:
 
 - Search by item name or exact ID; filter to craftable items.
 - Save up to 50 watchlist items plus sale world, output quality, and comparison preferences.
@@ -180,3 +180,14 @@ These require an actual FFXIV/Dalamud session; compilation, API smoke checks, an
 - Compare batch costs and price-drop outcomes against the displayed shopping plan.
 - Refresh one tracked item during a full scan, then change DC or close the window; verify no cancelled result updates the old scope.
 - Reload the plugin and confirm quantity fields and comparisons persist.
+
+## v0.8 interface
+
+- **Discover / My plans / Item lookup** provide direct navigation. Saved plans remain accessible while logged out.
+- Discover leads with spend, profit, quantity, ROI, estimated sale time, and units/day. Choose most profit, fastest sale, lowest cost, or highest ROI. Selection stays highlighted and empty filters offer a reset.
+- Budget, sales-share assumptions, and demand limits live under **Budget & preferences**. Coverage counters and calculation details are expandable.
+- Selected opportunities show **Buy → Craft/bring home → List** steps before optional batch comparisons, price scenarios, evidence, and regional history.
+- **Watch item** saves without reserving demand; **Plan this batch** reserves its output. Both open the saved plan. Existing reservations are preserved. Quantities, checklist progress, and manual completion remain separate.
+- My plans shows active plans and reserved units, expands the plan just saved, and asks before deleting saved progress.
+
+In-game layout QA remains necessary: test at 900px and wider, at your UI scaling, with long item names, empty results, expanded comparisons, and several saved plans. Automated builds do not verify the rendered FFXIV interface.

@@ -51,6 +51,17 @@ internal static class MonitorChecks
             Equal(2L, PriceScenarios.Profit(row, 10)); Equal(-10L, PriceScenarios.Profit(row, 20));
             Equal<long?>(null, PriceScenarios.BreakEven(row with { OutputQuantity = 0 }));
         });
+        Test("Watching saves a plan without reserving demand; planning reserves the batch", () =>
+        {
+            var watched = new List<MonitoredOpportunity>();
+            Equal(true, OpportunityMonitor.Add(watched, plan, "DC", now, reserve: false));
+            Equal(0, watched[0].UnsoldQuantity);
+            var planned = new List<MonitoredOpportunity>();
+            Equal(true, OpportunityMonitor.Add(planned, plan, "DC", now, reserve: true));
+            Equal(plan.OutputQuantity, planned[0].UnsoldQuantity);
+            Equal(false, OpportunityMonitor.Add(watched, plan, "DC", now, reserve: true));
+            Equal(0, watched[0].UnsoldQuantity);
+        });
         Test("Batch estimate accounts for quantity and chosen market share", () =>
         { Equal<double?>(5, SaleTiming.Days(10, 2, 100)); Equal<double?>(20, SaleTiming.Days(10, 2, 25)); });
         Test("Unknown zero and invalid demand do not produce a fake ETA", () =>

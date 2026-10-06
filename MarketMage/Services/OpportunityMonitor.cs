@@ -11,10 +11,10 @@ public static class OpportunityMonitor
     public static bool Matches(MonitoredOpportunity entry, GilOpportunity row, string dc) =>
         entry.SourceDataCenter == dc && entry.SavedPlan.SaleWorld == row.SaleWorld && entry.SavedPlan.Key == row.Key;
 
-    public static bool Add(IList<MonitoredOpportunity> entries, GilOpportunity row, string dc, DateTimeOffset now)
+    public static bool Add(IList<MonitoredOpportunity> entries, GilOpportunity row, string dc, DateTimeOffset now, bool reserve = true)
     {
         if (entries.Any(e => !e.Sold && Matches(e, row, dc)) || entries.Count(e => !e.Sold) >= MaximumActive) return false;
-        entries.Add(new() { SourceDataCenter = dc, SavedPlan = row, LatestPlan = row, SavedAt = now, LastCheckedAt = now });
+        entries.Add(new() { CommittedQuantity = reserve ? row.OutputQuantity : 0, SourceDataCenter = dc, SavedPlan = row, LatestPlan = row, SavedAt = now, LastCheckedAt = now });
         return true;
     }
 
